@@ -1,0 +1,12 @@
+python-docx
+openpyxl
+python-pptx
+requests
+fastapi
+uvicorn
+sqlalchemy
+mysql-connector-python
+passlib
+python-jose
+python-multipart
+pdf2docx
