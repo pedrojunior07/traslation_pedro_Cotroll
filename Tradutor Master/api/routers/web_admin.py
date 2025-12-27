@@ -59,6 +59,10 @@ def _get_admin(db: Session, request: Request) -> User:
     return user
 
 
+def get_admin(request: Request, db: Session = Depends(get_db)) -> User:
+    return _get_admin(db, request)
+
+
 @router.get("/admin/login", response_class=HTMLResponse)
 def admin_login_page(request: Request) -> str:
     error = request.query_params.get("error")
@@ -230,7 +234,12 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
       }
       header .brand { font-weight: 700; letter-spacing: 0.6px; }
       header .tag { color: var(--muted); font-size: 12px; }
-      main { padding: 24px; display: grid; gap: 16px; }
+      .tabs { display: flex; gap: 8px; margin-bottom: 16px; padding: 0 24px; padding-top: 16px; }
+      .tab { padding: 10px 20px; background: transparent; border: 1px solid var(--line); border-radius: 8px 8px 0 0; cursor: pointer; color: var(--muted); transition: all 0.3s; }
+      .tab.active { background: var(--card); color: var(--text); border-bottom: 1px solid var(--card); }
+      .tab-content { display: none; }
+      .tab-content.active { display: block; }
+      main { padding: 0 24px 24px; display: grid; gap: 16px; }
       section {
         background: linear-gradient(160deg, rgba(19, 28, 51, 0.95), rgba(19, 28, 51, 0.75));
         border: 1px solid var(--line);
@@ -277,9 +286,16 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
         <div class="brand">Tradutor Master Admin</div>
         <div class="tag">Painel de licencas e dispositivos</div>
       </div>
-      <div><a href="/admin/logout">Logout</a></div>
+      <div style="display: flex; gap: 16px; align-items: center;">
+        <a href="/admin/logout">Logout</a>
+      </div>
     </header>
+    <div class="tabs">
+      <div class="tab active" data-tab="licencas" onclick="switchTab('licencas', this)">Licenças</div>
+      <div class="tab" data-tab="testes" onclick="switchTab('testes', this)">Testes IA</div>
+    </div>
     <main>
+    <div id="tab-licencas" class="tab-content active">
       <section>
         <h2>Licencas</h2>
         <div class="row">
@@ -345,23 +361,112 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
         </div>
         <div>
           <h2>Config IA</h2>
-          <div class="row">
-            <select id="ai_enabled">
+          <div class="row" style="grid-template-columns: auto 1fr 1fr;">
+            <select id="ai_enabled" onchange="toggleAIEnabled()">
               <option value="true">Enabled</option>
               <option value="false">Disabled</option>
             </select>
-            <input id="ai_base" placeholder="Base URL">
-            <input id="ai_model" placeholder="Model">
-            <input id="ai_key" placeholder="API Key">
+            <select id="ai_provider" onchange="toggleProviderFields()">
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Gemini</option>
+              <option value="grok">Grok</option>
+            </select>
+            <input id="ai_timeout" placeholder="Timeout (s)" type="number" value="30">
+          </div>
+          <div id="openai_fields" style="display: none;">
+            <div class="row" style="grid-template-columns: 1fr 1fr 1fr;">
+              <input id="ai_base" placeholder="OpenAI Base URL">
+              <input id="ai_model" placeholder="OpenAI Model">
+              <input id="ai_key" placeholder="OpenAI API Key" type="password">
+            </div>
+          </div>
+          <div id="gemini_fields" style="display: none;">
+            <div class="row" style="grid-template-columns: 1fr 1fr;">
+              <div style="display: flex; gap: 8px;">
+                <select id="gemini_model" style="flex: 1;">
+                  <option value="">Selecione um modelo...</option>
+                </select>
+                <button type="button" onclick="loadGeminiModels()" class="btn-secondary" style="padding: 0 12px; white-space: nowrap;">🔄 Carregar</button>
+              </div>
+              <input id="gemini_key" placeholder="Gemini API Key" type="password">
+            </div>
+          </div>
+          <div id="grok_fields" style="display: none;">
+            <div class="row" style="grid-template-columns: 1fr 1fr;">
+              <input id="grok_model" placeholder="Grok Model">
+              <input id="grok_key" placeholder="Grok API Key" type="password">
+            </div>
           </div>
           <div class="toolbar">
             <button onclick="saveAI()">Salvar</button>
             <button class="btn-secondary" onclick="loadAI()">Recarregar</button>
             <span id="ai_status" class="status"></span>
           </div>
-          <div class="muted">A chave so sera salva se for informada.</div>
+          <div class="muted">Salve a configuração, depois teste na aba "🧪 Testes IA".</div>
         </div>
       </section>
+    </div>
+
+    <div id="tab-testes" class="tab-content">
+      <section>
+        <h2>🔄 Tradução em Lote (IA)</h2>
+        <p class="muted">Envia múltiplos tokens e recebe todas traduções de uma vez.</p>
+        <div style="margin-top: 12px;">
+          <label style="display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px;">Tokens JSON:</label>
+          <textarea id="batch_tokens" style="width: 100%; min-height: 200px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0f162b; color: var(--text); font-family: monospace; font-size: 12px;">{
+  "tokens": [
+    {"location": "Parágrafo 1", "text": "Hello World"},
+    {"location": "Parágrafo 2", "text": "How are you?"},
+    {"location": "Parágrafo 3", "text": "This is a test"}
+  ],
+  "source": "en",
+  "target": "pt"
+}</textarea>
+        </div>
+        <div class="row" style="grid-template-columns: 1fr 1fr; margin-top: 12px;">
+          <input id="batch_source" placeholder="Idioma origem (ex: en)" value="en">
+          <input id="batch_target" placeholder="Idioma destino (ex: pt)" value="pt">
+        </div>
+        <div class="toolbar" style="margin-top: 12px;">
+          <button onclick="testBatchTranslate()">▶️ Traduzir Lote</button>
+          <button class="btn-secondary" onclick="clearBatchResult()">Limpar</button>
+          <span id="batch_status" class="status"></span>
+        </div>
+        <div id="batch_result" style="margin-top: 12px; padding: 12px; background: #0f162b; border: 1px solid var(--line); border-radius: 8px; font-family: monospace; font-size: 12px; white-space: pre-wrap; display: none;"></div>
+      </section>
+
+      <section>
+        <h2>📝 Tradução Individual (IA)</h2>
+        <div class="row" style="grid-template-columns: 1fr 1fr;">
+          <input id="single_source" placeholder="Idioma origem" value="en">
+          <input id="single_target" placeholder="Idioma destino" value="pt">
+        </div>
+        <textarea id="single_text" placeholder="Texto para traduzir..." style="width: 100%; min-height: 100px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: #0f162b; color: var(--text); margin-top: 10px;">Hello, how are you today?</textarea>
+        <div class="toolbar" style="margin-top: 12px;">
+          <button onclick="testSingleTranslate()">▶️ Traduzir</button>
+          <button class="btn-secondary" onclick="clearSingleResult()">Limpar</button>
+          <span id="single_status" class="status"></span>
+        </div>
+        <div id="single_result" style="margin-top: 12px; padding: 12px; background: #0f162b; border: 1px solid var(--line); border-radius: 8px; font-family: monospace; font-size: 12px; white-space: pre-wrap; display: none;"></div>
+      </section>
+
+      <section>
+        <h2>📊 Informações do Sistema</h2>
+        <div class="grid-2">
+          <div>
+            <h3 style="font-size: 14px; margin-bottom: 8px;">Provedor Atual</h3>
+            <div id="info_provider" style="padding: 10px; background: #0f162b; border: 1px solid var(--line); border-radius: 8px; font-size: 13px;">-</div>
+          </div>
+          <div>
+            <h3 style="font-size: 14px; margin-bottom: 8px;">Modelo Configurado</h3>
+            <div id="info_model" style="padding: 10px; background: #0f162b; border: 1px solid var(--line); border-radius: 8px; font-size: 13px;">-</div>
+          </div>
+        </div>
+        <div class="toolbar" style="margin-top: 12px;">
+          <button class="btn-secondary" onclick="loadSystemInfo()">🔄 Atualizar Info</button>
+        </div>
+      </section>
+    </div>
     </main>
     <script>
       async function api(path, options) {
@@ -391,21 +496,20 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
           const tr = document.createElement("tr");
           const expires = lic.expires_at ? lic.expires_at.split("T")[0] : "";
           const days = lic.days_remaining != null ? lic.days_remaining : "";
-          tr.innerHTML = `
-            <td>${lic.id}</td>
-            <td>${lic.key}</td>
-            <td>${lic.type}</td>
-            <td>${lic.max_devices}</td>
-            <td>${lic.quota_type || ""} ${lic.quota_limit}</td>
-            <td>${lic.quota_period}</td>
-            <td>${expires}</td>
-            <td>${days}</td>
-            <td>${lic.is_active ? "yes" : "no"}</td>
-            <td class="actions">
-              <button class="btn-secondary" onclick="toggleLicense(${lic.id}, ${lic.is_active})">Ativar/Desativar</button>
-              <button class="btn-danger" onclick="rotateKey(${lic.id})">Rotate</button>
-            </td>
-          `;
+          tr.innerHTML =
+            "<td>" + lic.id + "</td>" +
+            "<td>" + lic.key + "</td>" +
+            "<td>" + lic.type + "</td>" +
+            "<td>" + lic.max_devices + "</td>" +
+            "<td>" + (lic.quota_type || "") + " " + lic.quota_limit + "</td>" +
+            "<td>" + lic.quota_period + "</td>" +
+            "<td>" + expires + "</td>" +
+            "<td>" + days + "</td>" +
+            "<td>" + (lic.is_active ? "yes" : "no") + "</td>" +
+            '<td class="actions">' +
+              '<button class="btn-secondary" onclick="toggleLicense(' + lic.id + ', ' + lic.is_active + ')">Ativar/Desativar</button>' +
+              '<button class="btn-danger" onclick="rotateKey(' + lic.id + ')">Rotate</button>' +
+            "</td>";
           body.appendChild(tr);
         }
         setStatus("lic_status", "OK");
@@ -427,12 +531,12 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
       }
 
       async function toggleLicense(id, isActive) {
-        await api(`/admin/api/licenses/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ is_active: !isActive }) });
+        await api("/admin/api/licenses/" + id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ is_active: !isActive }) });
         await loadLicenses();
       }
 
       async function rotateKey(id) {
-        await api(`/admin/api/licenses/${id}/rotate-key`, { method: "POST" });
+        await api("/admin/api/licenses/" + id + "/rotate-key", { method: "POST" });
         await loadLicenses();
       }
 
@@ -443,32 +547,31 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
         body.innerHTML = "";
         for (const dev of data) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `
-            <td>${dev.id}</td>
-            <td>${dev.license_id}</td>
-            <td>${dev.device_id}</td>
-            <td>${dev.device_name || ""}</td>
-            <td>${dev.is_blocked ? "yes" : "no"}</td>
-            <td>${dev.usage_today}</td>
-            <td>${dev.usage_month_count}</td>
-            <td>${dev.total_usage}</td>
-            <td class="actions">
-              <button class="btn-secondary" onclick="toggleDevice(${dev.id}, ${dev.is_blocked})">Block/Unblock</button>
-              <button class="btn-danger" onclick="resetDevice(${dev.id})">Reset</button>
-            </td>
-          `;
+          tr.innerHTML =
+            "<td>" + dev.id + "</td>" +
+            "<td>" + dev.license_id + "</td>" +
+            "<td>" + dev.device_id + "</td>" +
+            "<td>" + (dev.device_name || "") + "</td>" +
+            "<td>" + (dev.is_blocked ? "yes" : "no") + "</td>" +
+            "<td>" + dev.usage_today + "</td>" +
+            "<td>" + dev.usage_month_count + "</td>" +
+            "<td>" + dev.total_usage + "</td>" +
+            '<td class="actions">' +
+              '<button class="btn-secondary" onclick="toggleDevice(' + dev.id + ', ' + dev.is_blocked + ')">Block/Unblock</button>' +
+              '<button class="btn-danger" onclick="resetDevice(' + dev.id + ')">Reset</button>' +
+            "</td>";
           body.appendChild(tr);
         }
         setStatus("dev_status", "OK");
       }
 
       async function toggleDevice(id, isBlocked) {
-        await api(`/admin/api/devices/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ is_blocked: !isBlocked }) });
+        await api("/admin/api/devices/" + id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ is_blocked: !isBlocked }) });
         await loadDevices();
       }
 
       async function resetDevice(id) {
-        await api(`/admin/api/devices/${id}/reset-usage`, { method: "POST" });
+        await api("/admin/api/devices/" + id + "/reset-usage", { method: "POST" });
         await loadDevices();
       }
 
@@ -484,25 +587,241 @@ def admin_home(request: Request, db: Session = Depends(get_db)) -> str:
         setStatus("tr_status", "Fixo");
       }
 
+      function toggleProviderFields() {
+        const provider = document.getElementById("ai_provider").value;
+        document.getElementById("openai_fields").style.display = provider === "openai" ? "block" : "none";
+        document.getElementById("gemini_fields").style.display = provider === "gemini" ? "block" : "none";
+        document.getElementById("grok_fields").style.display = provider === "grok" ? "block" : "none";
+      }
+
+      function toggleAIEnabled() {
+        const enabled = document.getElementById("ai_enabled").value === "true";
+        document.getElementById("ai_provider").disabled = !enabled;
+        document.getElementById("ai_timeout").disabled = !enabled;
+
+        // Disable/enable all provider-specific input fields
+        const inputs = document.querySelectorAll('#openai_fields input, #gemini_fields input, #grok_fields input');
+        inputs.forEach(input => input.disabled = !enabled);
+      }
+
+      document.getElementById("ai_provider").addEventListener("change", toggleProviderFields);
+
+      async function loadGeminiModels() {
+        try {
+          setStatus("ai_status", "Carregando modelos...");
+          const data = await api("/admin/api/gemini/models");
+
+          const select = document.getElementById("gemini_model");
+          const currentValue = select.value;
+
+          // Limpar opções existentes
+          select.innerHTML = '<option value="">Selecione um modelo...</option>';
+
+          // Adicionar modelos disponíveis
+          for (const model of data.models) {
+            const option = document.createElement("option");
+            option.value = model.name;
+            option.textContent = model.displayName || model.name;
+            option.title = model.description;
+            select.appendChild(option);
+          }
+
+          // Restaurar valor selecionado se ainda existir
+          if (currentValue) {
+            select.value = currentValue;
+          }
+
+          setStatus("ai_status", data.models.length + " modelos carregados");
+        } catch (error) {
+          setStatus("ai_status", "✗ Erro ao carregar modelos");
+          alert("Erro ao carregar modelos: " + error.message + "\\n\\nCertifique-se de que a API key do Gemini está configurada.");
+        }
+      }
+
       async function loadAI() {
         const data = await api("/admin/api/settings/ai");
         document.getElementById("ai_enabled").value = data.enabled ? "true" : "false";
+        document.getElementById("ai_provider").value = data.provider || "openai";
+        document.getElementById("ai_timeout").value = data.timeout || 30;
+
+        // OpenAI fields
         document.getElementById("ai_base").value = data.base_url || "";
         document.getElementById("ai_model").value = data.model || "";
+        if (data.api_key_present) {
+          document.getElementById("ai_key").placeholder = "API Key (últimos 3: ...)";
+        }
+
+        // Gemini fields - add current model as option if set
+        const geminiSelect = document.getElementById("gemini_model");
+        if (data.gemini_model) {
+          geminiSelect.innerHTML = '<option value="">Selecione um modelo...</option><option value="' + data.gemini_model + '" selected>' + data.gemini_model + '</option>';
+        }
+        if (data.gemini_api_key_present) {
+          document.getElementById("gemini_key").placeholder = "API Key (últimos 3: ...)";
+        }
+
+        // Grok fields
+        document.getElementById("grok_model").value = data.grok_model || "";
+        if (data.grok_api_key_present) {
+          document.getElementById("grok_key").placeholder = "API Key (últimos 3: ...)";
+        }
+
+        toggleProviderFields();
+        toggleAIEnabled();
         setStatus("ai_status", "OK");
       }
 
       async function saveAI() {
+        const provider = document.getElementById("ai_provider").value;
         const payload = {
           enabled: document.getElementById("ai_enabled").value === "true",
-          base_url: document.getElementById("ai_base").value || null,
-          model: document.getElementById("ai_model").value || null
+          provider: provider,
+          timeout: parseFloat(document.getElementById("ai_timeout").value) || 30,
+          max_retries: 3
         };
-        const key = document.getElementById("ai_key").value;
-        if (key) payload.api_key = key;
+
+        // OpenAI fields
+        if (provider === "openai") {
+          payload.base_url = document.getElementById("ai_base").value || null;
+          payload.model = document.getElementById("ai_model").value || null;
+          const key = document.getElementById("ai_key").value;
+          if (key) payload.api_key = key;
+        }
+
+        // Gemini fields
+        if (provider === "gemini") {
+          payload.gemini_model = document.getElementById("gemini_model").value || null;
+          const key = document.getElementById("gemini_key").value;
+          if (key) payload.gemini_api_key = key;
+        }
+
+        // Grok fields
+        if (provider === "grok") {
+          payload.grok_model = document.getElementById("grok_model").value || null;
+          const key = document.getElementById("grok_key").value;
+          if (key) payload.grok_api_key = key;
+        }
+
         await api("/admin/api/settings/ai", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+
+        // Limpar campos de senha
         document.getElementById("ai_key").value = "";
+        document.getElementById("gemini_key").value = "";
+        document.getElementById("grok_key").value = "";
+
         setStatus("ai_status", "Salvo");
+      }
+
+      function switchTab(tabName, element) {
+        // Esconde todas as abas
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+
+        // Mostra aba selecionada
+        document.getElementById('tab-' + tabName).classList.add('active');
+
+        // Marca a tab clicada como ativa
+        if (element) {
+          element.classList.add('active');
+        }
+
+        // Carrega informações se for aba de testes
+        if (tabName === 'testes') {
+          loadSystemInfo();
+        }
+      }
+
+      async function testBatchTranslate() {
+        setStatus("batch_status", "Traduzindo...");
+        try {
+          const tokensData = JSON.parse(document.getElementById("batch_tokens").value);
+          const source = document.getElementById("batch_source").value;
+          const target = document.getElementById("batch_target").value;
+
+          const result = await api("/admin/api/test/translate-batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tokens: tokensData.tokens,
+              source: source,
+              target: target
+            })
+          });
+
+          document.getElementById("batch_result").style.display = "block";
+          document.getElementById("batch_result").textContent = JSON.stringify(result, null, 2);
+          setStatus("batch_status", "✓ Sucesso");
+        } catch (error) {
+          document.getElementById("batch_result").style.display = "block";
+          document.getElementById("batch_result").textContent = "Erro: " + error.message;
+          setStatus("batch_status", "✗ Erro");
+        }
+      }
+
+      async function testSingleTranslate() {
+        setStatus("single_status", "Traduzindo...");
+        try {
+          const text = document.getElementById("single_text").value;
+          const source = document.getElementById("single_source").value;
+          const target = document.getElementById("single_target").value;
+
+          const result = await api("/admin/api/test/translate-single", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: text,
+              source: source,
+              target: target
+            })
+          });
+
+          document.getElementById("single_result").style.display = "block";
+          document.getElementById("single_result").textContent = JSON.stringify(result, null, 2);
+          setStatus("single_status", "✓ Sucesso");
+        } catch (error) {
+          document.getElementById("single_result").style.display = "block";
+          document.getElementById("single_result").textContent = "Erro: " + error.message;
+          setStatus("single_status", "✗ Erro");
+        }
+      }
+
+      function clearBatchResult() {
+        document.getElementById("batch_result").style.display = "none";
+        document.getElementById("batch_result").textContent = "";
+        setStatus("batch_status", "");
+      }
+
+      function clearSingleResult() {
+        document.getElementById("single_result").style.display = "none";
+        document.getElementById("single_result").textContent = "";
+        setStatus("single_status", "");
+      }
+
+      async function loadSystemInfo() {
+        try {
+          const data = await api("/admin/api/settings/ai");
+
+          let providerText = data.provider.toUpperCase();
+          if (data.enabled) {
+            providerText += " (Ativado)";
+          } else {
+            providerText += " (Desativado)";
+          }
+          document.getElementById("info_provider").textContent = providerText;
+
+          let modelText = "";
+          if (data.provider === "openai") {
+            modelText = (data.model || "N/A") + " (" + (data.base_url || "N/A") + ")";
+          } else if (data.provider === "gemini") {
+            modelText = data.gemini_model || "N/A";
+          } else if (data.provider === "grok") {
+            modelText = data.grok_model || "N/A";
+          }
+          document.getElementById("info_model").textContent = modelText;
+        } catch (error) {
+          document.getElementById("info_provider").textContent = "Erro ao carregar";
+          document.getElementById("info_model").textContent = "Erro ao carregar";
+        }
       }
 
       loadLicenses();
@@ -631,9 +950,16 @@ def admin_get_ai(request: Request, db: Session = Depends(get_db)):
         db.refresh(cfg)
     return {
         "enabled": cfg.enabled,
+        "provider": cfg.provider,
         "base_url": cfg.base_url,
         "model": cfg.model,
         "api_key_present": bool(cfg.api_key),
+        "gemini_api_key_present": bool(cfg.gemini_api_key),
+        "gemini_model": cfg.gemini_model,
+        "grok_api_key_present": bool(cfg.grok_api_key),
+        "grok_model": cfg.grok_model,
+        "timeout": cfg.timeout,
+        "max_retries": cfg.max_retries,
     }
 
 
@@ -645,12 +971,26 @@ def admin_set_ai(request: Request, payload: dict, db: Session = Depends(get_db))
         cfg = AIConfig()
     if "enabled" in payload:
         cfg.enabled = bool(payload.get("enabled"))
+    if "provider" in payload:
+        cfg.provider = payload.get("provider")
     if payload.get("base_url") is not None:
         cfg.base_url = payload.get("base_url")
     if payload.get("model") is not None:
         cfg.model = payload.get("model")
     if payload.get("api_key") is not None:
         cfg.api_key = payload.get("api_key")
+    if payload.get("gemini_api_key") is not None:
+        cfg.gemini_api_key = payload.get("gemini_api_key")
+    if payload.get("gemini_model") is not None:
+        cfg.gemini_model = payload.get("gemini_model")
+    if payload.get("grok_api_key") is not None:
+        cfg.grok_api_key = payload.get("grok_api_key")
+    if payload.get("grok_model") is not None:
+        cfg.grok_model = payload.get("grok_model")
+    if "timeout" in payload:
+        cfg.timeout = float(payload.get("timeout"))
+    if "max_retries" in payload:
+        cfg.max_retries = int(payload.get("max_retries"))
     db.add(cfg)
     db.commit()
     db.refresh(cfg)
@@ -667,3 +1007,104 @@ def admin_get_translate(request: Request, db: Session = Depends(get_db)):
 def admin_set_translate(request: Request, payload: dict, db: Session = Depends(get_db)):
     _get_admin(db, request)
     return {"status": "readonly"}
+
+
+@router.get("/admin/ai-test", response_class=HTMLResponse)
+def admin_ai_test_page(request: Request, db: Session = Depends(get_db)) -> str:
+    """Página de testes de IA integrada com autenticação admin."""
+    from pathlib import Path
+
+    _get_admin(db, request)
+
+    html_file = Path(__file__).parent.parent / "templates" / "api_tester.html"
+    return html_file.read_text(encoding="utf-8")
+
+
+@router.post("/admin/api/test/translate-batch")
+def admin_test_batch_translate(request: Request, payload: dict, db: Session = Depends(get_db)):
+    """Testa tradução em lote sem precisar de device token."""
+    _get_admin(db, request)
+
+    from api.services import get_ai_provider
+
+    tokens = payload.get("tokens", [])
+    source = payload.get("source")
+    target = payload.get("target")
+    glossary = payload.get("glossary")
+
+    if not tokens or not source or not target:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required fields")
+
+    try:
+        provider = get_ai_provider(db)
+        translations = provider.translate_batch(tokens, source, target, glossary)
+        return {"translations": translations, "status": "success"}
+    except Exception as e:
+        import traceback
+        error_detail = f"Translation error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error_detail)
+
+
+@router.post("/admin/api/test/translate-single")
+def admin_test_single_translate(request: Request, payload: dict, db: Session = Depends(get_db)):
+    """Testa tradução individual sem precisar de device token."""
+    _get_admin(db, request)
+
+    from api.services import request_ai_translate
+
+    text = payload.get("text")
+    source = payload.get("source")
+    target = payload.get("target")
+    glossary = payload.get("glossary")
+
+    if not text or not source or not target:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required fields")
+
+    try:
+        translated = request_ai_translate(db, text, source, target, glossary)
+        return {"translatedText": translated, "status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Translation error: {str(e)}")
+
+
+@router.get("/admin/api/gemini/models")
+def admin_list_gemini_models(request: Request, db: Session = Depends(get_db)):
+    """Lista modelos disponíveis do Gemini."""
+    _get_admin(db, request)
+
+    import requests
+
+    cfg = db.query(AIConfig).first()
+    if not cfg or not cfg.gemini_api_key:
+        raise HTTPException(status_code=400, detail="Gemini API key não configurada")
+
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
+        headers = {"x-goog-api-key": cfg.gemini_api_key}
+
+        resp = requests.get(url, headers=headers, timeout=10)
+
+        if resp.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Gemini API error: {resp.status_code} {resp.text}")
+
+        data = resp.json()
+        models = data.get("models", [])
+
+        # Filtrar apenas modelos que suportam generateContent
+        available_models = []
+        for model in models:
+            model_name = model.get("name", "")
+            supported_methods = model.get("supportedGenerationMethods", [])
+
+            if "generateContent" in supported_methods:
+                # Extrair apenas o nome do modelo (remover "models/" prefix)
+                clean_name = model_name.replace("models/", "")
+                available_models.append({
+                    "name": clean_name,
+                    "displayName": model.get("displayName", clean_name),
+                    "description": model.get("description", "")
+                })
+
+        return {"models": available_models}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing models: {str(e)}")

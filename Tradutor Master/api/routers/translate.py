@@ -13,6 +13,8 @@ from api.schemas import (
     AITranslateRequest,
     ConsumeRequest,
     ConsumeResponse,
+    TranslateBatchRequest,
+    TranslateBatchResponse,
     TranslateRequest,
     TranslateResponse,
     UsageResponse,
@@ -24,6 +26,7 @@ from api.services import (
     request_ai_translate,
     request_languages,
     request_translation,
+    request_translation_batch,
 )
 
 router = APIRouter(tags=["translate"])
@@ -150,6 +153,135 @@ def translate(
     db.commit()
 
     return TranslateResponse(translatedText=translated)
+
+
+@router.post("/translate-batch", response_model=TranslateBatchResponse)
+def translate_batch(
+    payload: TranslateBatchRequest,
+    db: Session = Depends(get_db),
+    device: Device = Depends(get_current_device),
+) -> TranslateBatchResponse:
+    """
+    Traduz múltiplos textos de uma vez usando LibreTranslate.
+    Envia todos os textos em uma única requisição HTTP.
+    """
+    license_obj = db.query(License).filter(License.id == device.license_id).first()
+    if not license_obj or not _license_is_valid(license_obj):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid license")
+    if device.is_blocked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Device blocked")
+
+    # Calcula units: ou usa o especificado, ou conta número de textos
+    units = payload.units if payload.units is not None else len(payload.texts)
+    _enforce_limits(device, license_obj, units)
+
+    # Traduz todos os textos de uma vez
+    translations = request_translation_batch(db, payload.texts, payload.source, payload.target)
+
+    # Atualiza usage
+    device.usage_today += units
+    device.usage_month_count += units
+    device.total_usage += units
+    device.last_seen_at = datetime.utcnow()
+
+    # Log da tradução batch
+    log = TranslationLog(
+        device_id=device.id,
+        source=payload.source,
+        target=payload.target,
+        original_text=f"[BATCH {len(payload.texts)} texts]",
+        translated_text=f"[BATCH {len(translations)} translations]",
+        units=units,
+    )
+    db.add(device)
+    db.add(log)
+    db.commit()
+
+    return TranslateBatchResponse(translations=translations)
+
+
+@router.post("/translate-nllb", response_model=TranslateResponse)
+def translate_nllb(
+    payload: TranslateRequest,
+    db: Session = Depends(get_db),
+    device: Device = Depends(get_current_device),
+) -> TranslateResponse:
+    """
+    Traduz usando NLLB-200.
+    Códigos de língua: por_Latn, eng_Latn, fra_Latn, spa_Latn, etc.
+    """
+    license_obj = db.query(License).filter(License.id == device.license_id).first()
+    if not license_obj or not _license_is_valid(license_obj):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid license")
+    if device.is_blocked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Device blocked")
+
+    units = payload.units or 1
+    _enforce_limits(device, license_obj, units)
+
+    from api.services import request_nllb_translation
+    translated = request_nllb_translation(db, payload.text, payload.source, payload.target)
+
+    device.usage_today += units
+    device.usage_month_count += units
+    device.total_usage += units
+    device.last_seen_at = datetime.utcnow()
+
+    log = TranslationLog(
+        device_id=device.id,
+        source=payload.source,
+        target=payload.target,
+        original_text=payload.text,
+        translated_text=translated,
+        units=units,
+    )
+    db.add(device)
+    db.add(log)
+    db.commit()
+
+    return TranslateResponse(translatedText=translated)
+
+
+@router.post("/translate-nllb-batch", response_model=TranslateBatchResponse)
+def translate_nllb_batch(
+    payload: TranslateBatchRequest,
+    db: Session = Depends(get_db),
+    device: Device = Depends(get_current_device),
+) -> TranslateBatchResponse:
+    """
+    Traduz múltiplos textos usando NLLB-200 em paralelo.
+    Códigos de língua: por_Latn, eng_Latn, fra_Latn, etc.
+    """
+    license_obj = db.query(License).filter(License.id == device.license_id).first()
+    if not license_obj or not _license_is_valid(license_obj):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid license")
+    if device.is_blocked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Device blocked")
+
+    units = payload.units if payload.units is not None else len(payload.texts)
+    _enforce_limits(device, license_obj, units)
+
+    from api.services import request_nllb_translation_batch
+    translations = request_nllb_translation_batch(db, payload.texts, payload.source, payload.target)
+
+    device.usage_today += units
+    device.usage_month_count += units
+    device.total_usage += units
+    device.last_seen_at = datetime.utcnow()
+
+    log = TranslationLog(
+        device_id=device.id,
+        source=payload.source,
+        target=payload.target,
+        original_text=f"[NLLB-BATCH {len(payload.texts)} texts]",
+        translated_text=f"[NLLB-BATCH {len(translations)} translations]",
+        units=units,
+    )
+    db.add(device)
+    db.add(log)
+    db.commit()
+
+    return TranslateBatchResponse(translations=translations)
 
 
 @router.post("/ai/translate", response_model=TranslateResponse)
@@ -310,3 +442,84 @@ def usage_by_license(
 @router.get("/languages")
 def languages(db: Session = Depends(get_db), device: Device = Depends(get_current_device)):
     return request_languages(db)
+
+
+@router.post("/ai/translate-batch")
+def translate_batch_ai(
+    payload: dict,
+    db: Session = Depends(get_db),
+    device: Device = Depends(get_current_device),
+):
+    """
+    Traduz múltiplos tokens de uma vez usando IA.
+
+    Body:
+    {
+        "tokens": [
+            {"location": "Paragrafo 1", "text": "Hello"},
+            {"location": "Paragrafo 2", "text": "World"}
+        ],
+        "source": "en",
+        "target": "pt",
+        "glossary": {"Hello": "Olá"}  # opcional
+    }
+
+    Response:
+    {
+        "translations": [
+            {"location": "Paragrafo 1", "translation": "Olá"},
+            {"location": "Paragrafo 2", "translation": "Mundo"}
+        ]
+    }
+    """
+    license_obj = db.query(License).filter(License.id == device.license_id).first()
+    if not license_obj or not _license_is_valid(license_obj):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid license")
+    if device.is_blocked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Device blocked")
+
+    tokens = payload.get("tokens", [])
+    source = payload.get("source")
+    target = payload.get("target")
+    glossary = payload.get("glossary")
+
+    if not tokens or not source or not target:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required fields")
+
+    # Calcula units baseado no número de tokens
+    units = len(tokens)
+    _enforce_limits(device, license_obj, units)
+
+    # Traduz usando IA provider configurado
+    from api.services import get_ai_provider
+
+    try:
+        provider = get_ai_provider(db)
+        translations = provider.translate_batch(tokens, source, target, glossary)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Translation error: {str(e)}")
+
+    # Atualiza usage
+    device.usage_today += units
+    device.usage_month_count += units
+    device.total_usage += units
+    device.last_seen_at = datetime.utcnow()
+
+    # Log da tradução em lote (combina todos os textos)
+    original_combined = "\n".join([t.get("text", "") for t in tokens])
+    translated_combined = "\n".join([t.get("translation", "") for t in translations])
+
+    log = TranslationLog(
+        device_id=device.id,
+        source=source,
+        target=target,
+        original_text=original_combined,
+        translated_text=translated_combined,
+        units=units,
+    )
+
+    db.add(device)
+    db.add(log)
+    db.commit()
+
+    return {"translations": translations}

@@ -122,6 +122,17 @@ class TranslateResponse(BaseModel):
     translatedText: str
 
 
+class TranslateBatchRequest(BaseModel):
+    texts: list[str]
+    source: str
+    target: str
+    units: Optional[int] = None
+
+
+class TranslateBatchResponse(BaseModel):
+    translations: list[str]
+
+
 class AITranslateRequest(BaseModel):
     text: str
     source: str
@@ -186,16 +197,30 @@ class UsageResponse(BaseModel):
 
 class AIConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
+    provider: Optional[str] = None  # openai, gemini, grok
     base_url: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    gemini_model: Optional[str] = None
+    grok_api_key: Optional[str] = None
+    grok_model: Optional[str] = None
+    timeout: Optional[float] = None
+    max_retries: Optional[int] = None
 
 
 class AIConfigOut(BaseModel):
     enabled: bool
+    provider: str
     base_url: str
     model: str
     api_key_present: bool
+    gemini_api_key_present: bool
+    gemini_model: str
+    grok_api_key_present: bool
+    grok_model: str
+    timeout: float
+    max_retries: int
 
 
 class TranslateConfigUpdate(BaseModel):
@@ -206,3 +231,35 @@ class TranslateConfigUpdate(BaseModel):
 class TranslateConfigOut(BaseModel):
     base_url: str
     timeout: float
+
+
+class TranslationTokenOut(BaseModel):
+    """Schema para retornar informações de um token traduzido."""
+    id: int
+    location: str
+    original_text: str
+    translated_text: str
+    original_length: int
+    translated_length: int
+    was_truncated: bool
+    size_ratio: float
+    units: int
+    warnings: Optional[list[str]] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TranslationLogWithTokens(BaseModel):
+    """Schema para retornar log de tradução com todos os tokens."""
+    id: int
+    device_id: int
+    source: str
+    target: str
+    original_text: str
+    translated_text: str
+    units: int
+    created_at: datetime
+    tokens: list[TranslationTokenOut]
+
+    model_config = ConfigDict(from_attributes=True)

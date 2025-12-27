@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Tradutor Master Admin - OpenAI Test</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: #0f172a;
+        --card: #131c33;
+        --accent: #f97316;
+        --accent-2: #22c55e;
+        --muted: #94a3b8;
+        --text: #e5e7eb;
+        --line: rgba(148, 163, 184, 0.2);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Bahnschrift", "Candara", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(1200px 600px at 10% 10%, rgba(249, 115, 22, 0.15), transparent 60%),
+          radial-gradient(900px 500px at 90% 20%, rgba(34, 197, 94, 0.12), transparent 60%),
+          var(--bg);
+        color: var(--text);
+      }
+      header {
+        background: linear-gradient(90deg, #0b1020, #0f172a);
+        border-bottom: 1px solid var(--line);
+        color: #fff;
+        padding: 18px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      header .brand { font-weight: 700; letter-spacing: 0.6px; }
+      header .tag { color: var(--muted); font-size: 12px; }
+      main { padding: 24px; display: grid; gap: 16px; }
+      section {
+        background: linear-gradient(160deg, rgba(19, 28, 51, 0.95), rgba(19, 28, 51, 0.75));
+        border: 1px solid var(--line);
+        padding: 16px;
+        border-radius: 14px;
+        box-shadow: 0 18px 50px rgba(0,0,0,0.35);
+      }
+      h2 { margin: 0 0 12px; font-size: 16px; }
+      input, select {
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0f162b;
+        color: var(--text);
+        width: 100%;
+      }
+      button {
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 8px;
+        background: linear-gradient(90deg, var(--accent), #fb923c);
+        color: #0b1020;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .hidden-api-key {
+        -webkit-text-security: disc;
+        font-family: monospace;
+      }
+      #result {
+        margin-top: 20px;
+        padding: 10px;
+        border: 1px solid #eee;
+        border-radius: 5px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 10px;
+      }
+      a { color: #e5e7eb; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <div class="brand">Tradutor Master Admin</div>
+        <div class="tag">Painel de Licencas e Dispositivos</div>
+      </div>
+      <div><a href="/admin/logout">Logout</a></div>
+    </header>
+    <main>
+      <section>
+        <h2>OpenAI API Key Test</h2>
+        <div class="hint">Chave salva: <span id="saved-key">{{ saved_key_tail or "nenhuma" }}</span> (ultimas 4 letras)</div>
+        <form id="api-test-form">
+          <input type="text" id="api-key-input" placeholder="Cole uma chave para testar (opcional)">
+          <input type="text" id="api-key-display" class="hidden-api-key" readonly>
+          <div style="display: flex; gap: 10px; margin-top: 10px;">
+            <button type="button" id="btn-test-saved">Testar chave salva</button>
+            <button type="submit">Testar chave informada</button>
+          </div>
+        </form>
+        <div id="result"></div>
+      </section>
+    </main>
+
+    <script>
+        const apiKeyInput = document.getElementById('api-key-input');
+        const apiKeyDisplay = document.getElementById('api-key-display');
+        const form = document.getElementById('api-test-form');
+        const resultDiv = document.getElementById('result');
+
+        apiKeyInput.addEventListener('input', (e) => {
+            const value = e.target.value;
+            if (value.length > 4) {
+                apiKeyDisplay.value = value.slice(0, -4).replace(/./g, '*') + value.slice(-4);
+            } else {
+                apiKeyDisplay.value = value;
+            }
+        });
+
+        async function testKey(useSaved) {
+            const apiKey = apiKeyInput.value.trim();
+            if (!useSaved && !apiKey) {
+                resultDiv.textContent = 'Informe uma chave ou use a chave salva.';
+                return;
+            }
+            resultDiv.textContent = 'Testing...';
+
+            const payload = useSaved ? {} : { api_key: apiKey };
+            const response = await fetch('/admin/openai/test', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            if (response.ok) {
+                resultDiv.textContent = 'API Key valida.\n\nResposta:\n' + JSON.stringify(result, null, 2);
+            } else {
+                resultDiv.textContent = 'Erro:\n' + JSON.stringify(result, null, 2);
+            }
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await testKey(false);
+        });
+
+        document.getElementById('btn-test-saved').addEventListener('click', async () => {
+            await testKey(true);
+        });
+    </script>
+  </body>
+</html>

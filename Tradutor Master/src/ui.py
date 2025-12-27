@@ -17,6 +17,9 @@ from api_client import (
     get_languages,
     get_usage,
     register_device,
+    translate_batch,
+    translate_nllb,
+    translate_nllb_batch,
     translate_text,
 )
 from extractor import extract_tokens
@@ -45,8 +48,11 @@ class TranslatorUI:
         self.ai_translate_var = tk.BooleanVar(value=False)
         self.ai_evaluate_var = tk.BooleanVar(value=True)
         self.ai_glossary_var = tk.BooleanVar(value=False)
+        self.batch_translate_var = tk.BooleanVar(value=True)
+        self.translation_provider_var = tk.StringVar(value="libretranslate")  # libretranslate, nllb, both
         self.glossary: Dict[str, str] = {}
         self.eta_var = tk.StringVar(value="ETA: -")
+        self.translation_time_var = tk.StringVar(value="Tempo: -")
         self.file_progress_var = tk.StringVar(value="Arquivo: -")
         self.files_count_var = tk.StringVar(value="Arquivos: -")
         self.folder_files: List[str] = []
@@ -184,14 +190,22 @@ class TranslatorUI:
         ttk.Checkbutton(ai_frame, text="Gerar glossario IA", variable=self.ai_glossary_var).grid(
             row=0, column=2, sticky=tk.W, padx=(10, 0)
         )
+        ttk.Checkbutton(ai_frame, text="Tradução em lote (+ rápido)", variable=self.batch_translate_var).grid(
+            row=0, column=3, sticky=tk.W, padx=(10, 0)
+        )
+
+        ttk.Label(ai_frame, text="Provider:").grid(row=0, column=4, sticky=tk.W, padx=(10, 5))
+        provider_combo = ttk.Combobox(ai_frame, textvariable=self.translation_provider_var, state="readonly", width=12)
+        provider_combo["values"] = ("libretranslate", "nllb", "ambos")
+        provider_combo.grid(row=0, column=5, sticky=tk.W, padx=(0, 10))
 
         self.evaluate_ai_btn = ttk.Button(ai_frame, text="Avaliar agora", command=self.evaluate_tokens_ai)
         self.evaluate_ai_btn.grid(
-            row=0, column=3, sticky=tk.W, padx=(10, 0)
+            row=0, column=6, sticky=tk.W, padx=(10, 0)
         )
         self.glossary_ai_btn = ttk.Button(ai_frame, text="Criar glossario", command=self.build_glossary_ai)
         self.glossary_ai_btn.grid(
-            row=0, column=4, sticky=tk.W, padx=(10, 0)
+            row=0, column=7, sticky=tk.W, padx=(10, 0)
         )
 
         batch_list_frame = ttk.LabelFrame(self.root, text="Arquivos da pasta", padding=10)
@@ -230,6 +244,7 @@ class TranslatorUI:
         self.batch_progress = ttk.Progressbar(batch_progress, length=360, mode="determinate")
         self.batch_progress.pack(side=tk.LEFT, padx=(0, 10))
         ttk.Label(batch_progress, textvariable=self.eta_var).pack(side=tk.LEFT)
+        ttk.Label(batch_progress, textvariable=self.translation_time_var, foreground="green").pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(batch_progress, textvariable=self.file_progress_var).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(batch_progress, textvariable=self.spinner_var).pack(side=tk.LEFT, padx=(10, 0))
 
@@ -404,6 +419,61 @@ class TranslatorUI:
         if not clean:
             return 1
         return max(1, (len(clean) + 1799) // 1800)
+
+    def _to_nllb_code(self, iso_code: str) -> str:
+        """Convert ISO language code to NLLB-200 format."""
+        mapping = {
+            "en": "eng_Latn",
+            "pt": "por_Latn",
+            "fr": "fra_Latn",
+            "es": "spa_Latn",
+            "de": "deu_Latn",
+            "it": "ita_Latn",
+            "nl": "nld_Latn",
+            "pl": "pol_Latn",
+            "ru": "rus_Cyrl",
+            "ar": "arb_Arab",
+            "zh": "zho_Hans",
+            "ja": "jpn_Jpan",
+            "ko": "kor_Hang",
+            "hi": "hin_Deva",
+            "tr": "tur_Latn",
+            "vi": "vie_Latn",
+            "th": "tha_Thai",
+            "id": "ind_Latn",
+            "ms": "zsm_Latn",
+            "sw": "swh_Latn",
+            "he": "heb_Hebr",
+            "cs": "ces_Latn",
+            "da": "dan_Latn",
+            "fi": "fin_Latn",
+            "el": "ell_Grek",
+            "hu": "hun_Latn",
+            "no": "nob_Latn",
+            "ro": "ron_Latn",
+            "sk": "slk_Latn",
+            "sv": "swe_Latn",
+            "uk": "ukr_Cyrl",
+            "bg": "bul_Cyrl",
+            "ca": "cat_Latn",
+            "hr": "hrv_Latn",
+            "sr": "srp_Cyrl",
+            "sl": "slv_Latn",
+            "et": "est_Latn",
+            "lv": "lvs_Latn",
+            "lt": "lit_Latn",
+            "fa": "pes_Arab",
+            "ur": "urd_Arab",
+            "bn": "ben_Beng",
+            "ta": "tam_Taml",
+            "te": "tel_Telu",
+            "ml": "mal_Mlym",
+            "kn": "kan_Knda",
+            "mr": "mar_Deva",
+            "gu": "guj_Gujr",
+            "pa": "pan_Guru",
+        }
+        return mapping.get(iso_code.lower(), iso_code)
 
     def _token_status(self, token: Token) -> str:
         if token.skip:
@@ -807,7 +877,102 @@ class TranslatorUI:
             results: List[tuple[int, str]] = []
             errors: List[str] = []
             start_time = time.time()
+            batch_items: List[tuple[int, int, Token]] = []  # Para rastrear tokens traduzidos em batch
+
+            # Batch translation: traduz tokens simples (sem segmentos) de uma vez
+            if self.batch_translate_var.get() and not self.ai_translate_var.get():
+                # Coleta tokens que podem ser traduzidos em batch
+                for idx, (token_index, token) in enumerate(items, start=1):
+                    if token.skip:
+                        continue
+                    segments = guard.segment_text(token.text)
+                    # Apenas tokens simples (sem segmentação ou 1 segmento traduzível)
+                    if (not segments) or (len(segments) == 1 and segments[0].translatable):
+                        batch_items.append((idx, token_index, token))
+
+                if batch_items:
+                    try:
+                        # Traduz todos de uma vez
+                        texts_to_translate = [token.text for _, _, token in batch_items]
+                        total_units = sum(self._estimate_units(t) for t in texts_to_translate)
+
+                        provider = self.translation_provider_var.get()
+                        batch_start_time = time.time()
+
+                        if provider == "nllb":
+                            # Converte códigos para NLLB (en -> eng_Latn, pt -> por_Latn)
+                            nllb_source = self._to_nllb_code(source)
+                            nllb_target = self._to_nllb_code(target)
+                            translations = translate_nllb_batch(
+                                base_url,
+                                self.device_token or "",
+                                texts_to_translate,
+                                nllb_source,
+                                nllb_target,
+                                units=total_units,
+                            )
+                        elif provider == "ambos":
+                            # Traduz com os dois e compara
+                            nllb_source = self._to_nllb_code(source)
+                            nllb_target = self._to_nllb_code(target)
+
+                            libre_start = time.time()
+                            libre_translations = translate_batch(base_url, self.device_token or "", texts_to_translate, source, target, units=total_units)
+                            libre_time = time.time() - libre_start
+
+                            nllb_start = time.time()
+                            nllb_translations = translate_nllb_batch(base_url, self.device_token or "", texts_to_translate, nllb_source, nllb_target, units=total_units)
+                            nllb_time = time.time() - nllb_start
+
+                            # Usa o mais rápido (ou permite escolher)
+                            if libre_time < nllb_time:
+                                translations = libre_translations
+                                self.root.after(0, lambda: self.translation_time_var.set(f"⚡ LibreTranslate: {libre_time:.1f}s | NLLB: {nllb_time:.1f}s"))
+                            else:
+                                translations = nllb_translations
+                                self.root.after(0, lambda: self.translation_time_var.set(f"⚡ NLLB: {nllb_time:.1f}s | Libre: {libre_time:.1f}s"))
+                        else:
+                            # LibreTranslate (padrão)
+                            translations = translate_batch(
+                                base_url,
+                                self.device_token or "",
+                                texts_to_translate,
+                                source,
+                                target,
+                                units=total_units,
+                            )
+
+                        batch_elapsed = time.time() - batch_start_time
+                        if provider != "ambos":
+                            self.root.after(0, lambda: self.translation_time_var.set(f"Tempo: {batch_elapsed:.1f}s ({provider})"))
+
+                        # Aplica resultados
+                        for (idx, token_index, token), translated in zip(batch_items, translations):
+                            results.append((token_index, translated))
+                            # Atualiza progresso
+                            elapsed = time.time() - start_time
+                            avg = elapsed / max(1, idx)
+                            remaining = avg * max(0, total - idx)
+                            eta_text = f"ETA: {int(remaining)}s (batch)"
+                            self.root.after(
+                                0,
+                                lambda i=idx, eta=eta_text, t_idx=token_index, tok=token: self._update_progress(
+                                    i, total, eta, t_idx, tok
+                                ),
+                            )
+                    except APIError as exc:
+                        errors.append(f"Batch translation error: {exc}")
+                        # Fallback para tradução individual se batch falhar
+                        self.batch_translate_var.set(False)
+
+            # Set de token_index já traduzidos em batch
+            batch_translated_indexes = {token_index for _, token_index, _ in batch_items} if self.batch_translate_var.get() and not self.ai_translate_var.get() and batch_items else set()
+
+            # Tradução individual (tokens restantes ou quando batch está desativado)
             for idx, (token_index, token) in enumerate(items, start=1):
+                # Pula se já foi traduzido em batch
+                if token_index in batch_translated_indexes:
+                    continue
                 if token.skip:
                     elapsed = time.time() - start_time
                     avg = elapsed / max(1, idx)
@@ -837,9 +1002,25 @@ class TranslatorUI:
                                 units=units,
                             )
                         else:
-                            final_text = translate_text(
-                                base_url, self.device_token or "", token.text, source, target, units=units
-                            )
+                            # Respeita a escolha do provider
+                            provider = self.translation_provider_var.get()
+                            if provider == "nllb":
+                                nllb_source = self._to_nllb_code(source)
+                                nllb_target = self._to_nllb_code(target)
+                                final_text = translate_nllb(
+                                    base_url, self.device_token or "", token.text, nllb_source, nllb_target, units=units
+                                )
+                            elif provider == "ambos":
+                                # Para individual, testa ambos e usa o LibreTranslate
+                                nllb_source = self._to_nllb_code(source)
+                                nllb_target = self._to_nllb_code(target)
+                                final_text = translate_text(
+                                    base_url, self.device_token or "", token.text, source, target, units=units
+                                )
+                            else:
+                                final_text = translate_text(
+                                    base_url, self.device_token or "", token.text, source, target, units=units
+                                )
                     else:
                         parts: List[str] = []
                         for segment in segments:
@@ -858,9 +1039,23 @@ class TranslatorUI:
                                     units=units,
                                 )
                             else:
-                                translated_part = translate_text(
-                                    base_url, self.device_token or "", segment.text, source, target, units=units
-                                )
+                                # Respeita a escolha do provider
+                                provider = self.translation_provider_var.get()
+                                if provider == "nllb":
+                                    nllb_source = self._to_nllb_code(source)
+                                    nllb_target = self._to_nllb_code(target)
+                                    translated_part = translate_nllb(
+                                        base_url, self.device_token or "", segment.text, nllb_source, nllb_target, units=units
+                                    )
+                                elif provider == "ambos":
+                                    # Para individual, usa LibreTranslate
+                                    translated_part = translate_text(
+                                        base_url, self.device_token or "", segment.text, source, target, units=units
+                                    )
+                                else:
+                                    translated_part = translate_text(
+                                        base_url, self.device_token or "", segment.text, source, target, units=units
+                                    )
                             parts.append(translated_part)
                         final_text = "".join(parts)
                     results.append((token_index, final_text))

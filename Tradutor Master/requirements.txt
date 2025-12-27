@@ -10,3 +10,6 @@ passlib
 python-jose
 python-multipart
 pdf2docx
+openai
+jinja2
+lxml

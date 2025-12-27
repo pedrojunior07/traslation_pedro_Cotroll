@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from api.config import Settings
 from api.database import Base, SessionLocal, engine
 from api.models import AIConfig, TranslateConfig, User
-from api.routers import auth, devices, licenses, settings, translate, users, web_admin
+from api.routers import auth, devices, licenses, settings, translate, users, web_admin, openai_test, translation_tokens
 from api.security import hash_password
 
 settings_cfg = Settings()
@@ -44,9 +46,18 @@ app.include_router(licenses.router)
 app.include_router(devices.router)
 app.include_router(settings.router)
 app.include_router(translate.router)
+app.include_router(translation_tokens.router)
 app.include_router(web_admin.router)
+app.include_router(openai_test.router)
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/test", response_class=HTMLResponse)
+def api_tester():
+    """Frontend HTML para testar todas as APIs."""
+    html_file = Path(__file__).parent / "templates" / "api_tester.html"
+    return html_file.read_text(encoding="utf-8")

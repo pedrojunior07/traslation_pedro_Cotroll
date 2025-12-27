@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 from pdf2docx import Converter
 from pptx import Presentation
 
+from docx_xml_handler import extract_tokens_from_docx_xml
 from utils import Token
 
 
@@ -26,33 +27,34 @@ def extract_tokens(file_path: str) -> List[Token]:
 
 
 def _extract_docx(file_path: str) -> List[Token]:
-    doc = Document(file_path)
-    tokens: List[Token] = []
-    for idx, para in enumerate(doc.paragraphs, start=1):
-        text = para.text
-        if text and text.strip():
-            tokens.append(Token(file_path, f"Paragrafo {idx}", text))
-    for t_idx, table in enumerate(doc.tables, start=1):
-        for r_idx, row in enumerate(table.rows, start=1):
-            for c_idx, cell in enumerate(row.cells, start=1):
-                text = cell.text
-                if text and text.strip():
-                    loc = f"Tabela {t_idx} L{r_idx}C{c_idx}"
-                    tokens.append(Token(file_path, loc, text))
-    return tokens
+    """
+    Extrai tokens usando manipulação XML direta para preservação RIGOROSA.
+    Cada elemento <w:t> no XML vira um token separado.
+    Preserva ABSOLUTAMENTE TODA formatação, tabelas, imagens, quebras de página.
+    """
+    return extract_tokens_from_docx_xml(file_path)
 
 
 def _extract_pptx(file_path: str) -> List[Token]:
+    """
+    Extrai tokens do PowerPoint preservando estrutura.
+    """
     pres = Presentation(file_path)
     tokens: List[Token] = []
-    for s_idx, slide in enumerate(pres.slides, start=1):
-        for shape_idx, shape in enumerate(slide.shapes, start=1):
+
+    for s_idx, slide in enumerate(pres.slides):
+        for shape_idx, shape in enumerate(slide.shapes):
             if not getattr(shape, "has_text_frame", False):
                 continue
-            text = shape.text
-            if text and text.strip():
-                loc = f"Slide {s_idx} Forma {shape_idx}"
-                tokens.append(Token(file_path, loc, text))
+
+            text_frame = shape.text_frame
+            for para_idx, para in enumerate(text_frame.paragraphs):
+                for run_idx, run in enumerate(para.runs):
+                    text = run.text
+                    if text and text.strip():
+                        location = f"S{s_idx}SH{shape_idx}P{para_idx}R{run_idx}"
+                        tokens.append(Token(file_path, location, text))
+
     return tokens
 
 

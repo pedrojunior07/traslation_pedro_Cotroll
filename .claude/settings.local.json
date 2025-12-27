@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-Process -Id 25692 -ErrorAction SilentlyContinue)",
+      "Bash(Stop-Process -Force)",
+      "Bash(\"./Tradutor Master/.venv/Scripts/python.exe\" -m py_compile:*)"
+    ]
+  }
+}

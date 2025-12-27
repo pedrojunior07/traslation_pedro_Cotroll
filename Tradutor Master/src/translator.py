@@ -1,169 +1,223 @@
 import os
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 from docx import Document
 from openpyxl import load_workbook
 from pptx import Presentation
 
+from docx_xml_handler import export_docx_with_xml
+from text_adjuster import TextAdjuster
 from utils import Token
 
 
-def export_translated_document(source_path: str, tokens: Iterable[Token], output_path: str) -> None:
-    translation_map = _build_translation_map(tokens)
+def export_translated_document(
+    source_path: str,
+    tokens: Iterable[Token],
+    output_path: str,
+    enable_size_adjustment: bool = True,
+    max_length_ratio: float = 1.5,
+    adjust_font_size: bool = False,
+) -> Dict[str, List[str]]:
+    """
+    Exporta documento traduzido PRESERVANDO formatação, imagens e estrutura.
+
+    Args:
+        source_path: Caminho do arquivo original
+        tokens: Lista de tokens com traduções
+        output_path: Caminho para salvar o arquivo traduzido
+        enable_size_adjustment: Se deve ajustar tamanho do texto
+        max_length_ratio: Razão máxima permitida (traduzido/original)
+        adjust_font_size: Se deve ajustar tamanho de fonte (DOCX/PPTX)
+
+    Returns:
+        Dicionário com avisos gerados durante exportação
+    """
+    tokens_list = list(tokens)
+
     ext = os.path.splitext(source_path)[1].lower()
     if ext == ".docx":
-        _export_docx(source_path, translation_map, output_path)
+        return _export_docx(source_path, tokens_list, output_path, enable_size_adjustment, max_length_ratio)
     elif ext in (".pptx", ".ppsx"):
-        _export_pptx(source_path, translation_map, output_path)
+        translation_map = _build_translation_map(tokens_list)
+        adjuster = TextAdjuster(max_length_ratio=max_length_ratio, enable_truncation=enable_size_adjustment) if enable_size_adjustment else None
+        return _export_pptx(source_path, translation_map, output_path, adjuster)
     elif ext in (".xlsx", ".xlsm"):
-        _export_xlsx(source_path, translation_map, output_path, keep_vba=ext == ".xlsm")
+        translation_map = _build_translation_map(tokens_list)
+        adjuster = TextAdjuster(max_length_ratio=max_length_ratio, enable_truncation=enable_size_adjustment) if enable_size_adjustment else None
+        return _export_xlsx(source_path, translation_map, output_path, keep_vba=ext == ".xlsm", adjuster=adjuster)
     elif ext in (".txt",):
-        _export_txt(source_path, translation_map, output_path)
+        translation_map = _build_translation_map(tokens_list)
+        adjuster = TextAdjuster(max_length_ratio=max_length_ratio, enable_truncation=enable_size_adjustment) if enable_size_adjustment else None
+        return _export_txt(source_path, translation_map, output_path, adjuster)
     else:
         raise ValueError(f"Extensao nao suportada para exportar: {ext}")
 
 
-def _build_translation_map(tokens: Iterable[Token]) -> Dict[str, str]:
-    translation_map: Dict[str, str] = {}
+def _build_translation_map(tokens: Iterable[Token]) -> Dict[str, tuple]:
+    """
+    Constrói mapa de traduções com texto original.
+
+    Returns:
+        Dicionário {location: (original_text, translated_text)}
+    """
+    translation_map: Dict[str, tuple] = {}
     for token in tokens:
         translation = token.translation
         if translation.strip():
-            translation_map[token.location] = translation
+            translation_map[token.location] = (token.text, translation)
     return translation_map
 
 
-def _distribute_text(text: str, weights: Iterable[int]) -> List[str]:
-    weights_list = list(weights)
-    if not weights_list:
-        return []
-    total = sum(weights_list)
-    if total <= 0:
-        return [text] + [""] * (len(weights_list) - 1)
-    target_len = len(text)
-    lengths = [int(target_len * w / total) for w in weights_list]
-    delta = target_len - sum(lengths)
-    for idx in range(abs(delta)):
-        pos = idx % len(lengths)
-        lengths[pos] += 1 if delta > 0 else -1
-    parts: List[str] = []
-    cursor = 0
-    for length in lengths:
-        if length <= 0:
-            parts.append("")
-            continue
-        parts.append(text[cursor : cursor + length])
-        cursor += length
-    if cursor < len(text) and parts:
-        parts[-1] += text[cursor:]
-    return parts
+def _export_docx(
+    source_path: str,
+    tokens: List[Token],
+    output_path: str,
+    enable_size_adjustment: bool = True,
+    max_length_ratio: float = 1.5,
+) -> Dict[str, List[str]]:
+    """
+    Exporta DOCX usando manipulação XML direta para preservação RIGOROSA:
+    - Formatação completa (negrito, itálico, cores, fontes)
+    - Imagens e shapes
+    - Quebras de página
+    - Tabelas com linhas delimitadoras
+    - Headers e Footers
+    - Número EXATO de páginas mantido
+    - TEXTO COMPLETO sem truncamento (XML preserva estrutura)
+    """
+    warnings_map = {}
+
+    # IMPORTANTE: NÃO truncar textos em DOCX
+    # O XML preserva a estrutura, então texto maior não quebra o layout
+    # Apenas gerar avisos se texto ficar muito maior
+    if enable_size_adjustment:
+        for token in tokens:
+            if token.translation and token.translation.strip():
+                original_len = len(token.text)
+                translated_len = len(token.translation)
+                ratio = translated_len / original_len if original_len > 0 else 1.0
+
+                # Apenas avisar se texto cresceu muito, MAS NÃO TRUNCAR
+                if ratio > max_length_ratio:
+                    warning = f"Texto traduzido {ratio:.1f}x maior que original ({original_len} -> {translated_len} chars)"
+                    warnings_map[token.location] = [warning]
+
+    # Exportar usando manipulação XML direta - TEXTO COMPLETO
+    export_docx_with_xml(source_path, tokens, output_path)
+
+    return warnings_map
 
 
-def _replace_docx_paragraph_text(paragraph, new_text: str) -> None:  # noqa: ANN001
-    runs = paragraph.runs
-    if not runs:
-        paragraph.text = new_text
-        return
-    parts = _distribute_text(new_text, [len(run.text) for run in runs])
-    if not parts:
-        paragraph.text = new_text
-        return
-    for run, part in zip(runs, parts):
-        run.text = part
-
-
-def _replace_pptx_paragraph_text(paragraph, new_text: str) -> None:  # noqa: ANN001
-    runs = paragraph.runs
-    if not runs:
-        paragraph.text = new_text
-        return
-    parts = _distribute_text(new_text, [len(run.text) for run in runs])
-    if not parts:
-        paragraph.text = new_text
-        return
-    for run, part in zip(runs, parts):
-        run.text = part
-
-
-def _split_for_paragraphs(paragraph_texts: Iterable[str], text: str) -> List[str]:
-    texts = list(paragraph_texts)
-    count = len(texts)
-    if count <= 1:
-        return [text]
-    parts = text.split("\n")
-    if len(parts) == count:
-        return parts
-    weights = [len(value) for value in texts]
-    return _distribute_text(text, weights)
-
-
-def _export_docx(source_path: str, translation_map: Dict[str, str], output_path: str) -> None:
-    doc = Document(source_path)
-    for idx, para in enumerate(doc.paragraphs, start=1):
-        location = f"Paragrafo {idx}"
-        translation = translation_map.get(location)
-        if translation:
-            _replace_docx_paragraph_text(para, translation)
-
-    for t_idx, table in enumerate(doc.tables, start=1):
-        for r_idx, row in enumerate(table.rows, start=1):
-            for c_idx, cell in enumerate(row.cells, start=1):
-                location = f"Tabela {t_idx} L{r_idx}C{c_idx}"
-                translation = translation_map.get(location)
-                if translation:
-                    parts = _split_for_paragraphs((para.text for para in cell.paragraphs), translation)
-                    for para, part in zip(cell.paragraphs, parts):
-                        _replace_docx_paragraph_text(para, part)
-
-    doc.save(output_path)
-
-
-def _export_pptx(source_path: str, translation_map: Dict[str, str], output_path: str) -> None:
+def _export_pptx(
+    source_path: str,
+    translation_map: Dict[str, tuple],
+    output_path: str,
+    adjuster: Optional[TextAdjuster] = None,
+) -> Dict[str, List[str]]:
+    """
+    Exporta PPTX substituindo APENAS o texto dos runs, preservando formatação completa.
+    """
     pres = Presentation(source_path)
-    for s_idx, slide in enumerate(pres.slides, start=1):
-        for shape_idx, shape in enumerate(slide.shapes, start=1):
+    warnings_map = {}
+
+    for s_idx, slide in enumerate(pres.slides):
+        for shape_idx, shape in enumerate(slide.shapes):
             if not getattr(shape, "has_text_frame", False):
                 continue
-            location = f"Slide {s_idx} Forma {shape_idx}"
-            translation = translation_map.get(location)
-            if translation:
-                text_frame = shape.text_frame
-                parts = _split_for_paragraphs((para.text for para in text_frame.paragraphs), translation)
-                for para, part in zip(text_frame.paragraphs, parts):
-                    _replace_pptx_paragraph_text(para, part)
+
+            text_frame = shape.text_frame
+            for para_idx, para in enumerate(text_frame.paragraphs):
+                for run_idx, run in enumerate(para.runs):
+                    location = f"S{s_idx}SH{shape_idx}P{para_idx}R{run_idx}"
+                    trans_data = translation_map.get(location)
+                    if trans_data:
+                        original_text, translated_text = trans_data
+
+                        if adjuster:
+                            result = adjuster.adjust_text(original_text, translated_text)
+                            translated_text = result.adjusted_text
+                            if result.warnings:
+                                warnings_map[location] = result.warnings
+
+                        run.text = translated_text
+
     pres.save(output_path)
+    return warnings_map
 
 
-def _export_xlsx(source_path: str, translation_map: Dict[str, str], output_path: str, keep_vba: bool = False) -> None:
+def _export_xlsx(
+    source_path: str,
+    translation_map: Dict[str, tuple],
+    output_path: str,
+    keep_vba: bool = False,
+    adjuster: Optional[TextAdjuster] = None,
+) -> Dict[str, List[str]]:
+    """Exporta XLSX com ajuste de tamanho."""
     wb = load_workbook(source_path, keep_vba=keep_vba)
+    warnings_map = {}
+
     for sheet in wb:
         for row_idx, row in enumerate(sheet.iter_rows(), start=1):
             for col_idx, cell in enumerate(row, start=1):
                 location = f"{sheet.title}!R{row_idx}C{col_idx}"
-                translation = translation_map.get(location)
-                if translation:
-                    cell.value = translation
+                trans_data = translation_map.get(location)
+                if trans_data:
+                    original_text, translated_text = trans_data
+                    warnings = []
+
+                    if adjuster:
+                        result = adjuster.adjust_text(original_text, translated_text)
+                        translated_text = result.adjusted_text
+                        warnings = result.warnings
+
+                    cell.value = translated_text
+
+                    if warnings:
+                        warnings_map[location] = warnings
+
     wb.save(output_path)
     wb.close()
+    return warnings_map
 
 
-def _export_txt(source_path: str, translation_map: Dict[str, str], output_path: str) -> None:
+def _export_txt(
+    source_path: str,
+    translation_map: Dict[str, tuple],
+    output_path: str,
+    adjuster: Optional[TextAdjuster] = None,
+) -> Dict[str, List[str]]:
+    """Exporta TXT com ajuste de tamanho."""
     with open(source_path, "r", encoding="utf-8") as src_file:
         lines = src_file.readlines()
 
     new_lines = []
+    warnings_map = {}
+
     for idx, line in enumerate(lines, start=1):
         location = f"Linha {idx}"
-        translation = translation_map.get(location)
-        if translation:
+        trans_data = translation_map.get(location)
+        if trans_data:
+            original_text, translated_text = trans_data
+            warnings = []
+
+            if adjuster:
+                result = adjuster.adjust_text(original_text, translated_text)
+                translated_text = result.adjusted_text
+                warnings = result.warnings
+
             ending = ""
             if line.endswith("\r\n"):
                 ending = "\r\n"
             elif line.endswith("\n"):
                 ending = "\n"
-            new_lines.append(f"{translation}{ending}")
+            new_lines.append(f"{translated_text}{ending}")
+
+            if warnings:
+                warnings_map[location] = warnings
         else:
             new_lines.append(line)
 
     with open(output_path, "w", encoding="utf-8") as out_file:
         out_file.writelines(new_lines)
 
+    return warnings_map

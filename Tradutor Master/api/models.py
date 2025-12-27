@@ -84,9 +84,23 @@ class AIConfig(Base):
 
     id = Column(Integer, primary_key=True)
     enabled = Column(Boolean, default=False)
+    provider = Column(String(32), default="openai")  # openai, gemini, grok
     base_url = Column(String(255), default="https://api.openai.com/v1")
     model = Column(String(128), default="gpt-4o-mini")
     api_key = Column(Text, default="")
+
+    # Configurações específicas para Gemini
+    gemini_api_key = Column(Text, default="")
+    gemini_model = Column(String(128), default="gemini-1.5-flash")
+
+    # Configurações específicas para Grok
+    grok_api_key = Column(Text, default="")
+    grok_model = Column(String(128), default="grok-2-latest")
+
+    # Timeouts e limites
+    timeout = Column(Float, default=30.0)
+    max_retries = Column(Integer, default=3)
+
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 
@@ -94,6 +108,32 @@ class TranslateConfig(Base):
     __tablename__ = "translate_config"
 
     id = Column(Integer, primary_key=True)
+    # Provider: "libretranslate" ou "nllb"
+    provider = Column(String(32), default="libretranslate")
+
+    # LibreTranslate config
     base_url = Column(String(255), default="http://102.211.186.44/translate")
+
+    # NLLB config
+    nllb_base_url = Column(String(255), default="http://102.211.186.111:8000")
+
     timeout = Column(Float, default=15.0)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TranslationToken(Base):
+    """Armazena informações detalhadas de cada token traduzido."""
+    __tablename__ = "translation_tokens"
+
+    id = Column(Integer, primary_key=True)
+    translation_log_id = Column(Integer, ForeignKey("translation_logs.id"), nullable=False, index=True)
+    location = Column(String(255), nullable=False)  # Ex: "Paragrafo 1", "Tabela 1 L1C1"
+    original_text = Column(Text, nullable=False)
+    translated_text = Column(Text, nullable=False)
+    original_length = Column(Integer, nullable=False)
+    translated_length = Column(Integer, nullable=False)
+    was_truncated = Column(Boolean, default=False)
+    size_ratio = Column(Float, nullable=False)  # translated_length / original_length
+    units = Column(Integer, default=1)
+    warnings = Column(Text, nullable=True)  # JSON array de avisos
+    created_at = Column(DateTime, default=utcnow)
