@@ -5,7 +5,8 @@
       "Bash(curl:*)",
       "Bash(\".venv/Scripts/python.exe\" -m py_compile src/ui.py)",
       "Bash(\".venv/Scripts/python.exe\" -m py_compile \"c:\\\\Users\\\\user\\\\Documents\\\\GitHub\\\\traslation_pedro_Cotroll\\\\Tradutor Master\\\\src\\\\ui.py\")",
-      "Bash(\".venv/Scripts/python.exe\" -m py_compile:*)"
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile:*)",
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile \"src/libretranslate_client.py\")"
     ]
   }
 }

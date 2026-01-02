@@ -157,15 +157,27 @@ class ClaudeClient:
         if not tokens:
             return [], {"input_tokens": 0, "output_tokens": 0, "cost": 0.0}
 
-        # Construir glossário se fornecido
+        # Construir glossário se fornecido - formatado de forma rigorosa
         glossary_text = ""
         if dictionary:
-            glossary_text = "\n\nGLOSSÁRIO (preservar estes termos exatamente):\n"
-            for term, translation in dictionary.items():
-                glossary_text += f"- {term} → {translation}\n"
+            glossary_text = "\n\n" + "="*80 + "\n"
+            glossary_text += "GLOSSÁRIO OBRIGATÓRIO - APLICAR COM PRECISÃO TOTAL\n"
+            glossary_text += "="*80 + "\n"
+            glossary_text += "ATENÇÃO: Estes termos devem ser traduzidos EXATAMENTE como especificado.\n"
+            glossary_text += "Inclui termos técnicos, siglas, abreviações e expressões específicas.\n"
+            glossary_text += "Prioridade MÁXIMA sobre tradução automática.\n\n"
+
+            # Ordenar por comprimento (maiores primeiro) para capturar frases completas antes de palavras
+            sorted_dict = sorted(dictionary.items(), key=lambda x: len(x[0]), reverse=True)
+
+            for term, translation in sorted_dict:
+                glossary_text += f"• {term} → {translation}\n"
+
+            glossary_text += "\n" + "="*80 + "\n"
 
         # System prompt com cache (dicionário será cacheado)
-        system_prompt = f"""Você é um tradutor profissional. Traduza de {source} para {target}.
+        system_prompt = f"""Você é um tradutor profissional especializado em documentos contratuais e técnicos.
+Traduza de {source} para {target} com precisão técnica e legal.
 
 IMPORTANTE: Retorne APENAS JSON válido, sem texto antes ou depois.
 
@@ -198,12 +210,30 @@ Output: {{
   ]
 }}
 
-OUTRAS REGRAS:
-- Mesma ORDEM dos textos originais
-- Preserve números, URLs, códigos
-- Nomes próprios: mantenha ou adapte conforme contexto{glossary_text}
+REGRAS DE TRADUÇÃO:
+1. SEMPRE consulte o glossário primeiro antes de traduzir qualquer termo
+2. Use EXATAMENTE as traduções do glossário quando encontrar os termos
+3. Mantenha formatação original (maiúsculas, minúsculas, pontuação)
+4. Preserve números, datas, códigos de referência, NIUTs
+5. Siglas: mantenha conforme glossário (ex: "VAT" → "IVA", "TAX ID" → "NUIT")
+6. Abreviações: aplique conforme glossário (ex: "Tel. No." → "Tel.")
+7. Expressões contratuais: use termos formais (ex: "shall be" → "deverá ser")
+8. Nomes de empresas e locais: adapte apenas quando especificado no glossário
+9. Mesma ORDEM dos textos originais
+10. Preserve estrutura e quebras de linha{glossary_text}
 
-ATENÇÃO: JSON inválido = erro fatal. Valide mentalmente antes de enviar."""
+EXEMPLOS DE APLICAÇÃO DO GLOSSÁRIO:
+- "Purchase Order No. 31628809" → "Ordem de Compra n.º 31628809"
+- "TAX ID: 401015418" → "NUIT: 401015418"
+- "Tel. No.: +258843118753" → "Tel.: +258843118753"
+- "Vendor code: 172248" → "Código do Fornecedor: 172248"
+- "Subject: PROVISION OF MEDICAL SERVICES" → "Assunto: PROVISÃO DOS SERVIÇOS MÉDICOS"
+- "Our reference: Work Order No. 31628809" → "Nossa referência: Ordem de Serviço n.º 31628809"
+
+ATENÇÃO CRÍTICA:
+- JSON inválido = erro fatal. Valide mentalmente antes de enviar.
+- Glossário tem PRIORIDADE ABSOLUTA sobre qualquer outra regra de tradução.
+- Revise cada termo para garantir que está no glossário antes de usar tradução automática."""
 
         # Preparar tokens em JSON
         tokens_json = json.dumps(tokens, ensure_ascii=False, indent=2)

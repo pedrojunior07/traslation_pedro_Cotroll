@@ -95,6 +95,21 @@ class TranslatorUI:
             libre_url = self.config.get("libretranslate_url", "http://102.211.186.44:5000")
             libre_timeout = self.config.get("libretranslate_timeout", 30.0)
             self.libre_client = LibreTranslateClient(base_url=libre_url, timeout=libre_timeout)
+
+            # Tentar carregar glossário do banco de dados para LibreTranslate
+            try:
+                if self.db:
+                    source_lang = self.source_var.get() if hasattr(self, 'source_var') else "en"
+                    target_lang = self.target_var.get() if hasattr(self, 'target_var') else "pt"
+                    glossary = self.db.get_dictionary(source_lang, target_lang)
+
+                    if glossary:
+                        self.libre_client.set_glossary(glossary)
+                        print(f"✓ Glossário carregado para LibreTranslate: {len(glossary)} termos")
+            except Exception as e:
+                print(f"⚠ Não foi possível carregar glossário do banco: {e}")
+                print("  Continuando sem glossário...")
+
         except Exception as e:
             print(f"⚠ Erro ao inicializar LibreTranslate: {e}")
 
@@ -110,6 +125,26 @@ class TranslatorUI:
         try:
             # Database
             self.db = Database(self.config)
+
+            # Atualizar glossário do LibreTranslate se banco foi conectado
+            if self.libre_client and self.db:
+                source_lang = self.source_var.get() if hasattr(self, 'source_var') else "en"
+                target_lang = self.target_var.get() if hasattr(self, 'target_lang') else "pt"
+
+                # Carregar glossário EN→PT
+                glossary = self.db.get_dictionary(source_lang, target_lang)
+
+                # IMPORTANTE: Também carregar correções PT→PT para pós-processamento
+                # Isso corrige traduções mal feitas do LibreTranslate
+                pt_corrections = self.db.get_dictionary("pt", "pt")
+                if pt_corrections:
+                    glossary.update(pt_corrections)
+                    print(f"✓ Correções PT→PT adicionadas: {len(pt_corrections)} termos")
+
+                if glossary:
+                    self.libre_client.set_glossary(glossary)
+                    print(f"✓ Glossário carregado para LibreTranslate: {len(glossary)} termos")
+
         except Exception as e:
             print(f"⚠ Erro ao conectar ao MySQL: {e}")
 
@@ -181,6 +216,12 @@ class TranslatorUI:
         )
         ttk.Checkbutton(lang_frame, text="Usar Dicionário", variable=self.use_dictionary_var).grid(
             row=0, column=5, sticky=tk.W, padx=5, pady=5
+        )
+        
+        # Checkbox de auto-save
+        self.auto_save_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(lang_frame, text="💾 Salvar Automaticamente", variable=self.auto_save_var).grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5
         )
 
         # Seção: Seleção de arquivos/pastas
@@ -865,7 +906,8 @@ Preços por 1 milhão de tokens."""
                 self.root,
                 files_and_tokens,
                 translate_func,
-                on_complete
+                on_complete,
+                auto_save=self.auto_save_var.get()
             )
 
         except Exception as e:

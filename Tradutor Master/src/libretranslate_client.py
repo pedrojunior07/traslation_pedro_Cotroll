@@ -6,25 +6,59 @@ Permite tradução direta sem passar pelo backend FastAPI.
 import requests
 from typing import List, Dict, Optional
 
+try:
+    from .glossary_processor import GlossaryProcessor
+    from .post_processor import DocumentPostProcessor
+except ImportError:
+    from glossary_processor import GlossaryProcessor
+    from post_processor import DocumentPostProcessor
+
 
 class LibreTranslateClient:
-    """Cliente direto para LibreTranslate"""
+    """Cliente direto para LibreTranslate com suporte a glossário"""
 
-    def __init__(self, base_url: str = "http://102.211.186.44:5000", timeout: float = 30.0):
+    def __init__(
+        self,
+        base_url: str = "http://102.211.186.44:5000",
+        timeout: float = 30.0,
+        glossary: Optional[Dict[str, str]] = None
+    ):
         """
         Inicializa cliente LibreTranslate.
 
         Args:
             base_url: URL base do servidor LibreTranslate (sem /translate no final)
             timeout: Timeout em segundos para requests (padrão: 30s)
+            glossary: Dicionário opcional {termo_origem: tradução} para pós-processamento
         """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.batch_size = 50  # Traduzir no máximo 50 textos por vez
 
+        # Configurar processador de glossário
+        self.glossary_processor = None
+        if glossary:
+            self.set_glossary(glossary)
+
+        # Sempre ativar pós-processador para correções de formatação
+        self.post_processor = DocumentPostProcessor()
+
+    def set_glossary(self, glossary: Dict[str, str]) -> None:
+        """
+        Define glossário para pós-processamento de traduções.
+
+        Args:
+            glossary: Dicionário {termo_origem: tradução}
+        """
+        if glossary:
+            self.glossary_processor = GlossaryProcessor(glossary)
+            print(f"  ℹ Glossário ativado com {len(glossary)} termos")
+        else:
+            self.glossary_processor = None
+
     def translate(self, text: str, source: str, target: str) -> str:
         """
-        Traduz texto simples.
+        Traduz texto simples e aplica glossário se configurado.
 
         Args:
             text: Texto a traduzir
@@ -32,7 +66,7 @@ class LibreTranslateClient:
             target: Código do idioma destino
 
         Returns:
-            Texto traduzido
+            Texto traduzido (com glossário aplicado se configurado)
 
         Raises:
             requests.HTTPError: Se houver erro na requisição
@@ -55,6 +89,15 @@ class LibreTranslateClient:
             translated = data.get("translatedText", "")
             if not translated:
                 raise Exception(f"LibreTranslate retornou resposta vazia. Payload: {payload}")
+
+            # Aplicar glossário se configurado
+            if self.glossary_processor:
+                translated, _ = self.glossary_processor.apply_to_text(translated)
+
+            # SEMPRE aplicar pós-processamento de formatação CCS JV
+            translated, corrections = self.post_processor.process_text(translated)
+            if corrections > 0:
+                print(f"  ✓ Pós-processamento aplicou {corrections} correções")
 
             return translated
         except requests.exceptions.Timeout:
@@ -160,7 +203,7 @@ class LibreTranslateClient:
         Traduz um único chunk de textos (usado internamente).
 
         Returns:
-            Lista de traduções
+            Lista de traduções (com glossário aplicado se configurado)
         """
         url = f"{self.base_url}/translate"
         payload = {"q": texts, "source": source, "target": target}
@@ -183,10 +226,27 @@ class LibreTranslateClient:
                 if empty_count > 0:
                     raise Exception(f"LibreTranslate retornou {empty_count} traduções vazias de {len(translations)}")
 
+                # Aplicar glossário se configurado
+                if self.glossary_processor:
+                    translations, subs_dict = self.glossary_processor.apply_to_batch(translations)
+                    if subs_dict:
+                        print(f"  ✓ Glossário aplicou {sum(len(subs) for subs in subs_dict.values())} substituições")
+
+                # SEMPRE aplicar pós-processamento de formatação CCS JV
+                translations, total_corrections = self.post_processor.process_batch(translations)
+                if total_corrections > 0:
+                    print(f"  ✓ Pós-processamento aplicou {total_corrections} correções")
+
                 return translations
             else:
                 # Fallback se formato for diferente
-                return [data.get("translatedText", "")] * len(texts)
+                translation = data.get("translatedText", "")
+
+                # Aplicar glossário se configurado
+                if self.glossary_processor and translation:
+                    translation, _ = self.glossary_processor.apply_to_text(translation)
+
+                return [translation] * len(texts)
 
         except requests.exceptions.Timeout:
             raise Exception(f"Timeout ao traduzir chunk com LibreTranslate após {self.timeout}s. URL: {url}")

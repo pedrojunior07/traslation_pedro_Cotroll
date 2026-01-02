@@ -25,7 +25,8 @@ class BatchTranslationWindow:
         files_and_tokens: List[Tuple[str, List[Token]]],
         translate_func: Callable[[str, List[str]], List[str]],
         on_complete: Callable[[List[Tuple[str, List[Token]]]], None],
-        progress_file: str = "translation_progress.json"
+        progress_file: str = "translation_progress.json",
+        auto_save: bool = True
     ):
         """
         Args:
@@ -34,11 +35,13 @@ class BatchTranslationWindow:
             translate_func: Função (file_path, textos) -> traduções
             on_complete: Callback quando completo (recebe lista de (file_path, tokens))
             progress_file: Arquivo para salvar progresso
+            auto_save: Se True, salva e exporta automaticamente ao concluir
         """
         self.files_and_tokens = files_and_tokens
         self.translate_func = translate_func
         self.on_complete = on_complete
         self.progress_file = progress_file
+        self.auto_save = auto_save
         self.completed = False
         self.translation_running = False
         self.translation_paused = False
@@ -298,7 +301,20 @@ class BatchTranslationWindow:
 
                         if not token.skip and token.text.strip():
                             # Traduzir
-                            translation = self.translate_func(file_path, [token.text])[0]
+                            translation_result = self.translate_func(file_path, [token.text])
+                            
+                            # Garantir que translation é string, não lista
+                            if isinstance(translation_result, list):
+                                translation = translation_result[0] if translation_result else ""
+                            else:
+                                translation = translation_result
+                            
+                            # Garantir que translation é string
+                            if isinstance(translation, list):
+                                translation = translation[0] if translation else ""
+                            elif not isinstance(translation, str):
+                                translation = str(translation) if translation else ""
+                            
                             token.translation = translation
 
                             # Atualizar progresso
@@ -391,20 +407,54 @@ class BatchTranslationWindow:
         def update():
             self.translation_running = False
             self.pause_btn.config(state=tk.DISABLED)
-            self.complete_btn.config(state=tk.NORMAL)
-
+            
             # Deletar arquivo de progresso
             if os.path.exists(self.progress_file):
                 os.remove(self.progress_file)
-
-            messagebox.showinfo(
-                "Tradução Completa",
-                f"✅ {len(self.files_and_tokens)} arquivos traduzidos!\n"
-                f"Total: {self.total_tokens} segmentos\n\n"
-                "Clique em 'Concluir' para exportar."
-            )
+            
+            if self.auto_save:
+                # Salvar e exportar automaticamente
+                self.complete_btn.config(state=tk.DISABLED, text="⏳ Salvando...")
+                
+                # Agendar exportação para depois (garantir que tradução terminou)
+                self.window.after(500, self._auto_export)
+            else:
+                # Modo manual - permitir revisão
+                self.complete_btn.config(state=tk.NORMAL)
+                messagebox.showinfo(
+                    "Tradução Completa",
+                    f"✅ {len(self.files_and_tokens)} arquivos traduzidos!\n"
+                    f"Total: {self.total_tokens} segmentos\n\n"
+                    "Clique em 'Concluir' para exportar."
+                )
 
         self.window.after(0, update)
+    
+    def _auto_export(self):
+        """Exporta automaticamente (chamado após tradução completa)"""
+        try:
+            self.completed = True
+            
+            # Chamar callback de exportação
+            self.on_complete(self.files_and_tokens)
+            
+            # Fechar janela automaticamente após pequeno delay
+            self.window.after(1000, self._close_window)
+            
+        except Exception as e:
+            messagebox.showerror(
+                "Erro ao Salvar",
+                f"Erro ao exportar arquivos:\n{e}"
+            )
+            self.complete_btn.config(state=tk.NORMAL, text="✅ Concluir")
+    
+    def _close_window(self):
+        """Fecha janela (thread-safe)"""
+        try:
+            self.window.grab_release()
+            self.window.destroy()
+        except:
+            pass
 
     def _show_error(self, error_msg: str):
         """Mostra erro (thread-safe)"""
@@ -422,16 +472,28 @@ class BatchTranslationWindow:
         self.window.after(0, update)
 
     def _on_complete(self):
-        """Concluir e exportar"""
-        self.completed = True
-
-        # Deletar arquivo de progresso
-        if os.path.exists(self.progress_file):
-            os.remove(self.progress_file)
-
-        self.window.grab_release()
-        self.window.destroy()
-        self.on_complete(self.files_and_tokens)
+        """Concluir e exportar (chamado pelo botão Concluir)"""
+        try:
+            self.completed = True
+            self.complete_btn.config(state=tk.DISABLED, text="⏳ Exportando...")
+            
+            # Deletar arquivo de progresso
+            if os.path.exists(self.progress_file):
+                os.remove(self.progress_file)
+            
+            # Chamar callback de exportação
+            self.on_complete(self.files_and_tokens)
+            
+            # Fechar janela
+            self.window.grab_release()
+            self.window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror(
+                "Erro ao Exportar",
+                f"Erro ao exportar arquivos:\n{e}"
+            )
+            self.complete_btn.config(state=tk.NORMAL, text="✅ Concluir")
 
     def _on_cancel(self):
         """Cancelar tradução"""
