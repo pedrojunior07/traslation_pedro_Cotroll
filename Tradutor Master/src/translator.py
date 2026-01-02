@@ -20,11 +20,12 @@ def export_translated_document(
 ) -> Dict[str, List[str]]:
     """
     Exporta documento traduzido PRESERVANDO formatação, imagens e estrutura.
+    IMPORTANTE: SEMPRE exporta como .docx, independente do formato original.
 
     Args:
         source_path: Caminho do arquivo original
         tokens: Lista de tokens com traduções
-        output_path: Caminho para salvar o arquivo traduzido
+        output_path: Caminho para salvar o arquivo traduzido (deve terminar em .docx)
         enable_size_adjustment: Se deve ajustar tamanho do texto
         max_length_ratio: Razão máxima permitida (traduzido/original)
         adjust_font_size: Se deve ajustar tamanho de fonte (DOCX/PPTX)
@@ -34,23 +35,34 @@ def export_translated_document(
     """
     tokens_list = list(tokens)
 
+    # Verificar extensão do arquivo original
     ext = os.path.splitext(source_path)[1].lower()
+
+    # IMPORTANTE: Garantir que output_path sempre seja .docx
+    if not output_path.lower().endswith('.docx'):
+        base = os.path.splitext(output_path)[0]
+        output_path = f"{base}.docx"
+        print(f"⚠ Output path corrigido para: {output_path}")
+
+    # Se for PDF, usar DOCX temporário criado durante extração
+    if ext == ".pdf":
+        if tokens_list and hasattr(tokens_list[0], 'source_file'):
+            # Usar o DOCX temporário como source
+            source_path = tokens_list[0].source_file
+            ext = ".docx"
+        else:
+            raise ValueError("PDF precisa ser convertido para DOCX antes de exportar")
+
+    # SEMPRE exportar como DOCX
     if ext == ".docx":
         return _export_docx(source_path, tokens_list, output_path, enable_size_adjustment, max_length_ratio)
-    elif ext in (".pptx", ".ppsx"):
-        translation_map = _build_translation_map(tokens_list)
-        adjuster = TextAdjuster(max_length_ratio=max_length_ratio, enable_truncation=enable_size_adjustment) if enable_size_adjustment else None
-        return _export_pptx(source_path, translation_map, output_path, adjuster)
-    elif ext in (".xlsx", ".xlsm"):
-        translation_map = _build_translation_map(tokens_list)
-        adjuster = TextAdjuster(max_length_ratio=max_length_ratio, enable_truncation=enable_size_adjustment) if enable_size_adjustment else None
-        return _export_xlsx(source_path, translation_map, output_path, keep_vba=ext == ".xlsm", adjuster=adjuster)
-    elif ext in (".txt",):
-        translation_map = _build_translation_map(tokens_list)
-        adjuster = TextAdjuster(max_length_ratio=max_length_ratio, enable_truncation=enable_size_adjustment) if enable_size_adjustment else None
-        return _export_txt(source_path, translation_map, output_path, adjuster)
     else:
-        raise ValueError(f"Extensao nao suportada para exportar: {ext}")
+        # Outros formatos não suportados - APENAS .docx é permitido
+        raise ValueError(
+            f"Apenas arquivos .docx são suportados para exportação.\n"
+            f"Arquivo original: {ext}\n"
+            f"Converta o arquivo para .docx antes de traduzir."
+        )
 
 
 def _build_translation_map(tokens: Iterable[Token]) -> Dict[str, tuple]:
@@ -63,7 +75,16 @@ def _build_translation_map(tokens: Iterable[Token]) -> Dict[str, tuple]:
     translation_map: Dict[str, tuple] = {}
     for token in tokens:
         translation = token.translation
-        if translation.strip():
+
+        # Proteção: garantir que translation é string
+        if isinstance(translation, list):
+            print(f"  AVISO: translation é lista no token {token.location}, convertendo para string")
+            translation = translation[0] if translation else ""
+        elif not isinstance(translation, str):
+            print(f"  AVISO: translation não é string no token {token.location}: {type(translation)}")
+            translation = str(translation) if translation else ""
+
+        if translation and translation.strip():
             translation_map[token.location] = (token.text, translation)
     return translation_map
 

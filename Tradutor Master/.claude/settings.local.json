@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 5 .venv/Scripts/python.exe:*)",
+      "Bash(curl:*)",
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile src/ui.py)",
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile \"c:\\\\Users\\\\user\\\\Documents\\\\GitHub\\\\traslation_pedro_Cotroll\\\\Tradutor Master\\\\src\\\\ui.py\")",
+      "Bash(\".venv/Scripts/python.exe\" -m py_compile:*)"
+    ]
+  }
+}

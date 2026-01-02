@@ -1,11 +1,20 @@
+# -*- coding: utf-8 -*-
+"""
+Ponto de entrada principal do Tradutor Master.
+Sistema redesenhado sem licenças - apenas LibreTranslate + Claude.
+"""
 import tkinter as tk
 
-from ui import TranslatorUI
+try:
+    from .ui import TranslatorUI
+except ImportError:
+    from ui import TranslatorUI
 
 
 def main() -> None:
+    """Inicia aplicação"""
     root = tk.Tk()
-    TranslatorUI(root)
+    app = TranslatorUI(root)
     root.mainloop()
 
 

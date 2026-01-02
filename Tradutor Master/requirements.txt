@@ -10,6 +10,6 @@ passlib
 python-jose
 python-multipart
 pdf2docx
-openai
+anthropic>=0.40.0
 jinja2
 lxml
