@@ -2,8 +2,12 @@
 """
 Cliente direto para Anthropic Claude.
 Permite tradução de documentos completos com otimização de tokens via cache.
+Suporta processamento paralelo otimizado para maximizar uso da API.
 """
 import json
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Tuple
 import anthropic
 
@@ -11,32 +15,65 @@ import anthropic
 class ClaudeClient:
     """Cliente direto para Anthropic Claude com suporte a cache de prompts"""
 
-    # Preços por 1M tokens (em USD)
+    # Preços por 1M tokens (em USD) - Atualizado 2026
     PRICING = {
-        # Sonnet 3.5 (versões disponíveis)
+        # Séria 4.5 (Lançada final de 2025)
+        "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30},
+        "claude-opus-4-5-20251101": {"input": 15.0, "output": 75.0, "cache_write": 18.75, "cache_read": 1.50},
+        "claude-haiku-4-5-20251001": {"input": 0.25, "output": 1.25, "cache_write": 0.30, "cache_read": 0.03},
+        # Sonnet 3.5 (Legado)
         "claude-3-5-sonnet-20241022": {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30},
         "claude-3-5-sonnet-20240620": {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30},
-        # Opus 3
+        # Opus 3 (Legado)
         "claude-3-opus-20240229": {"input": 15.0, "output": 75.0, "cache_write": 18.75, "cache_read": 1.50},
-        # Sonnet 3 (versão antiga)
-        "claude-3-sonnet-20240229": {"input": 3.0, "output": 15.0, "cache_write": 3.75, "cache_read": 0.30},
-        # Haiku 3
+        # Haiku 3 (Legado)
+        "claude-3-5-haiku-20241022": {"input": 0.25, "output": 1.25, "cache_write": 0.30, "cache_read": 0.03},
         "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25, "cache_write": 0.30, "cache_read": 0.03},
     }
 
     # Limites de max_tokens por modelo
     MAX_TOKENS_LIMITS = {
+        "claude-sonnet-4-5-20250929": 8192,
+        "claude-opus-4-5-20251101": 8192,
+        "claude-haiku-4-5-20251001": 8192,
         "claude-3-5-sonnet-20241022": 8192,
         "claude-3-5-sonnet-20240620": 8192,
         "claude-3-opus-20240229": 4096,
-        "claude-3-sonnet-20240229": 4096,
         "claude-3-haiku-20240307": 4096,
+        "claude-3-5-haiku-20241022": 8192,
+    }
+
+    # Rate limits (requisições por minuto) por modelo
+    RATE_LIMITS = {
+        "claude-sonnet-4-5-20250929": 100,  # Aumentado para 2026
+        "claude-opus-4-5-20251101": 100,
+        "claude-haiku-4-5-20251001": 100,
+        "claude-3-5-sonnet-20241022": 50,
+        "claude-3-5-sonnet-20240620": 50,
+        "claude-3-opus-20240229": 50,
+        "claude-3-haiku-20240307": 50,
+        "claude-3-5-haiku-20241022": 50,
+    }
+
+    # Batch size otimizado por modelo (quantos SEGMENTOS por requisição)
+    # LIMITADO PELO max_tokens (output)!
+    # Textos longos (contratos) podem ter ~80-100 tokens cada, então ser CONSERVADOR
+    # Cálculo seguro: max_tokens ÷ 100 tokens por segmento (textos longos)
+    OPTIMAL_BATCH_SIZES = {
+        "claude-sonnet-4-5-20250929": 100,
+        "claude-opus-4-5-20251101": 100,
+        "claude-haiku-4-5-20251001": 100,
+        "claude-3-5-sonnet-20241022": 80,
+        "claude-3-5-sonnet-20240620": 80,
+        "claude-3-opus-20240229": 40,
+        "claude-3-haiku-20240307": 40,
+        "claude-3-5-haiku-20241022": 80,
     }
 
     # Modelos válidos (para validação)
     VALID_MODELS = list(PRICING.keys())
 
-    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022", timeout: float = 120.0):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-5-20250929", timeout: float = 120.0, max_workers: int = None):
         """
         Inicializa cliente Claude.
 
@@ -44,6 +81,7 @@ class ClaudeClient:
             api_key: API key da Anthropic
             model: Modelo Claude a usar
             timeout: Timeout em segundos
+            max_workers: Número de threads paralelas (None = auto-detect baseado no modelo)
         """
         if not api_key:
             raise ValueError("API key é obrigatória")
@@ -62,6 +100,54 @@ class ClaudeClient:
         self.model = model
         self.timeout = timeout
         self.max_tokens = self.MAX_TOKENS_LIMITS.get(model, 4096)
+        self.rate_limit = self.RATE_LIMITS.get(model, 50)
+        self.optimal_batch_size = self.OPTIMAL_BATCH_SIZES.get(model, 100)
+
+        # Auto-detectar workers baseado no rate limit
+        # ESTRATÉGIA NOVA: Apenas 1 worker, batches GIGANTES
+        # Com batches de 1500 segmentos, a maioria dos documentos vai em 1-2 requisições
+        # SEM paralelismo = SEM problemas de rate limit
+        if max_workers is None:
+            max_workers = 1  # Apenas 1 worker = sem paralelismo, sem rate limit issues
+        self.max_workers = max_workers
+
+        # Controle de rate limiting
+        self._request_times = []  # Lista de timestamps das últimas requisições
+        self._lock = threading.Lock()
+
+        print(f"🚀 Claude Client inicializado:")
+        print(f"   Modelo: {model}")
+        print(f"   Batch size otimizado: {self.optimal_batch_size}")
+        print(f"   Workers paralelos: {self.max_workers}")
+        print(f"   Rate limit: {self.rate_limit} RPM")
+
+    def _wait_for_rate_limit(self):
+        """Aguarda se necessário para respeitar rate limit (50 RPM)"""
+        with self._lock:
+            now = time.time()
+
+            # Remover requisições antigas (> 60 segundos)
+            self._request_times = [t for t in self._request_times if now - t < 60]
+
+            # Se atingiu o limite, aguardar
+            if len(self._request_times) >= self.rate_limit:
+                # Tempo até a requisição mais antiga expirar
+                oldest = self._request_times[0]
+                wait_time = 60 - (now - oldest) + 0.5  # +0.5 para segurança extra
+
+                if wait_time > 0:
+                    print(f"⏸ Rate limit atingido ({self.rate_limit} RPM), aguardando {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    now = time.time()
+                    # Limpar novamente após espera
+                    self._request_times = [t for t in self._request_times if now - t < 60]
+
+            # Sem delay extra necessário - com 1 worker e batches gigantes,
+            # naturalmente fica abaixo do rate limit
+            # (cada requisição com 1500 segmentos demora ~10-20s para processar)
+
+            # Registrar esta requisição
+            self._request_times.append(time.time())
 
     def translate_document(
         self,
@@ -69,8 +155,10 @@ class ClaudeClient:
         source: str,
         target: str,
         dictionary: Optional[Dict[str, str]] = None,
-        batch_size: int = 100,
-        progress_callback: Optional[callable] = None
+        batch_size: int = None,
+        progress_callback: Optional[callable] = None,
+        use_parallel: bool = True,
+        company_name: Optional[str] = None
     ) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
         """
         Traduz documento em batches para evitar limite de output tokens.
@@ -94,13 +182,85 @@ class ClaudeClient:
         if not tokens:
             return [], {"input_tokens": 0, "output_tokens": 0, "cost": 0.0}
 
-        # Se houver poucos tokens, traduzir tudo de uma vez
-        if len(tokens) <= batch_size:
-            if progress_callback:
-                progress_callback(f"Traduzindo {len(tokens)} tokens com Claude...", 50)
-            return self._translate_batch(tokens, source, target, dictionary)
+        # DIVISÃO POR TOKENS REAIS (não por número de segmentos!)
+        # Estratégia: Acumular segmentos até atingir limite de TOKENS estimados
 
-        # Dividir em batches e traduzir
+        # Limite de tokens de output (30% para MARGEM ULTRA-CONSERVADORA)
+        # Reduzido de 50% para 30% após testes mostrarem que ainda excedia
+        max_output_tokens = int(self.max_tokens * 0.30)
+
+        print(f"\n📊 Estratégia de Divisão:")
+        print(f"   max_tokens disponível: {self.max_tokens}")
+        print(f"   Usando 30% para MARGEM ULTRA-CONSERVADORA: {max_output_tokens} tokens")
+        print(f"   Dividindo por TAMANHO REAL (não por número de segmentos)")
+
+        # Dividir em batches baseado em TOKENS ESTIMADOS
+        batches = []
+        current_batch = []
+        current_estimated_tokens = 0
+
+        for token in tokens:
+            text = token.get("text", "")
+            text_chars = len(text)
+
+            # Estimar tokens deste segmento - ULTRA CONSERVADOR:
+            # Português: ~3.5 chars/token, mas usar 2.0 para margem
+            # Multiplicador: 0.5 tokens/char (ao invés de real ~0.3)
+            estimated_text_tokens = int(text_chars * 0.5)  # 0.5 token por char (conservador)
+            json_overhead = 50  # Overhead da estrutura JSON (aumentado para 50)
+            segment_tokens = estimated_text_tokens + json_overhead
+
+            # Se adicionar este segmento EXCEDER o limite, fechar batch
+            if current_batch and (current_estimated_tokens + segment_tokens > max_output_tokens):
+                batches.append(current_batch)
+                print(f"   ✓ Batch {len(batches)}: {len(current_batch)} segmentos, ~{current_estimated_tokens} tokens")
+                current_batch = []
+                current_estimated_tokens = 0
+
+            # Adicionar segmento ao batch atual
+            current_batch.append(token)
+            current_estimated_tokens += segment_tokens
+
+        # Adicionar último batch
+        if current_batch:
+            batches.append(current_batch)
+            print(f"   ✓ Batch {len(batches)}: {len(current_batch)} segmentos, ~{current_estimated_tokens} tokens")
+
+        # VALIDAÇÃO: Garantir que TODOS os segmentos foram incluídos
+        total_segments_in_batches = sum(len(b) for b in batches)
+        if total_segments_in_batches != len(tokens):
+            raise Exception(
+                f"ERRO CRÍTICO: Divisão de batches perdeu segmentos!\n"
+                f"Total de segmentos: {len(tokens)}\n"
+                f"Segmentos nos batches: {total_segments_in_batches}\n"
+                f"Faltando: {len(tokens) - total_segments_in_batches}"
+            )
+
+        print(f"   ✅ Validação: {total_segments_in_batches}/{len(tokens)} segmentos em {len(batches)} batches")
+
+        # Se tudo couber em 1 batch, traduzir direto
+        if len(batches) == 1:
+            if progress_callback:
+                progress_callback(f"Traduzindo {len(tokens)} segmentos com Claude...", 50)
+            return self._translate_batch(tokens, source, target, dictionary, company_name)
+
+        num_batches = len(batches)
+
+        # Calcular estatísticas dos batches
+        avg_segments = sum(len(b) for b in batches) / len(batches) if batches else 0
+        min_segments = min(len(b) for b in batches) if batches else 0
+        max_segments = max(len(b) for b in batches) if batches else 0
+
+        print(f"\n{'='*80}")
+        print(f"📦 ESTRATÉGIA DE TRADUÇÃO:")
+        print(f"   Total de segmentos: {len(tokens)}")
+        print(f"   Número de requisições: {num_batches}")
+        print(f"   Segmentos por batch: mín={min_segments}, máx={max_segments}, média={avg_segments:.0f}")
+        print(f"   Modo: {'PARALELO' if use_parallel else 'SEQUENCIAL'} ({self.max_workers} worker{'s' if self.max_workers > 1 else ''})")
+        print(f"   💡 Divisão por TAMANHO REAL (não por número fixo)!")
+        print(f"{'='*80}\n")
+
+        # Inicializar estatísticas
         all_translations = []
         total_stats = {
             "input_tokens": 0,
@@ -110,46 +270,122 @@ class ClaudeClient:
             "cost": 0.0
         }
 
-        num_batches = (len(tokens) + batch_size - 1) // batch_size
-        print(f"📦 Dividindo {len(tokens)} tokens em {num_batches} batches de ~{batch_size} tokens")
+        if use_parallel and num_batches > 1:
+            # PROCESSAMENTO PARALELO - Maximiza uso da API
+            completed = 0
+            start_time = time.time()
 
-        for i in range(0, len(tokens), batch_size):
-            batch = tokens[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submeter todos os batches
+                future_to_batch = {
+                    executor.submit(self._translate_batch_with_rate_limit, batch, source, target, dictionary, company_name): i
+                    for i, batch in enumerate(batches)
+                }
 
-            # Atualizar progresso na UI
-            progress_pct = (batch_num / num_batches) * 100
-            msg = f"Claude: Batch {batch_num}/{num_batches} ({len(batch)} tokens)"
-            print(f"  Traduzindo batch {batch_num}/{num_batches} ({len(batch)} tokens)...")
-            if progress_callback:
-                progress_callback(msg, progress_pct)
+                # Processar conforme completam
+                for future in as_completed(future_to_batch):
+                    batch_idx = future_to_batch[future]
+                    try:
+                        translations, stats = future.result()
+                        all_translations.extend(translations)
 
-            try:
-                translations, stats = self._translate_batch(batch, source, target, dictionary)
-                all_translations.extend(translations)
+                        # Acumular estatísticas
+                        for key in total_stats:
+                            total_stats[key] += stats.get(key, 0)
 
-                # Acumular estatísticas
-                for key in total_stats:
-                    total_stats[key] += stats.get(key, 0)
+                        completed += 1
 
-            except Exception as e:
-                raise Exception(f"Erro no batch {batch_num}/{num_batches}: {str(e)}")
+                        # Atualizar progresso
+                        progress_pct = (completed / num_batches) * 100
+                        elapsed = time.time() - start_time
+                        rate = completed / elapsed if elapsed > 0 else 0
+                        eta = (num_batches - completed) / rate if rate > 0 else 0
 
-        print(f"✓ Tradução completa: {len(all_translations)} tokens traduzidos")
+                        msg = f"Claude: {completed}/{num_batches} batches ({int(rate * 60):.0f} req/min, ETA: {eta:.0f}s)"
+                        print(f"  ✓ Batch {completed}/{num_batches} completo - {int(rate * 60)} req/min")
+
+                        if progress_callback:
+                            progress_callback(msg, progress_pct)
+
+                    except Exception as e:
+                        raise Exception(f"Erro no batch {batch_idx + 1}/{num_batches}: {str(e)}")
+
+            elapsed_total = time.time() - start_time
+            final_rate = num_batches / elapsed_total if elapsed_total > 0 else 0
+            print(f"✓ Tradução paralela completa: {len(all_translations)} tokens em {elapsed_total:.1f}s ({int(final_rate * 60)} req/min)")
+
+        else:
+            # PROCESSAMENTO SEQUENCIAL - Para poucos batches
+            for i, batch in enumerate(batches):
+                batch_num = i + 1
+
+                # Calcular segmentos já traduzidos
+                segments_done = len(all_translations)
+                segments_total = len(tokens)
+
+                # Atualizar progresso na UI ANTES de traduzir
+                progress_pct = (segments_done / segments_total) * 100
+                msg = f"Claude: {segments_done}/{segments_total} segmentos traduzidos (Batch {batch_num}/{num_batches})"
+                print(f"  Traduzindo batch {batch_num}/{num_batches} ({len(batch)} segmentos)...")
+                if progress_callback:
+                    progress_callback(msg, progress_pct)
+
+                try:
+                    translations, stats = self._translate_batch(batch, source, target, dictionary, company_name)
+                    all_translations.extend(translations)
+
+                    # Acumular estatísticas
+                    for key in total_stats:
+                        total_stats[key] += stats.get(key, 0)
+
+                    # Atualizar progresso na UI DEPOIS de traduzir (em tempo real!)
+                    segments_done = len(all_translations)
+                    progress_pct = (segments_done / segments_total) * 100
+                    msg = f"Claude: {segments_done}/{segments_total} segmentos traduzidos ✓"
+                    if progress_callback:
+                        progress_callback(msg, progress_pct)
+
+                except Exception as e:
+                    raise Exception(f"Erro no batch {batch_num}/{num_batches}: {str(e)}")
+
+            print(f"✓ Tradução sequencial completa: {len(all_translations)} segmentos traduzidos")
+
         if progress_callback:
             progress_callback(f"✓ Tradução Claude completa: {len(all_translations)} tokens", 100)
 
         return all_translations, total_stats
+
+    def _translate_batch_with_rate_limit(
+        self,
+        tokens: List[Dict[str, str]],
+        source: str,
+        target: str,
+        dictionary: Optional[Dict[str, str]],
+        company_name: Optional[str] = None
+    ) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
+        """
+        Traduz batch respeitando rate limit.
+        Usado no processamento paralelo.
+        """
+        # Aguardar rate limit antes de fazer requisição
+        self._wait_for_rate_limit()
+
+        # Traduzir batch
+        return self._translate_batch(tokens, source, target, dictionary, company_name)
 
     def _translate_batch(
         self,
         tokens: List[Dict[str, str]],
         source: str,
         target: str,
-        dictionary: Optional[Dict[str, str]] = None
+        dictionary: Optional[Dict[str, str]] = None,
+        company_name: Optional[str] = None
     ) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
         """
         Traduz um único batch de tokens.
+
+        Args:
+            company_name: Nome da empresa que NUNCA deve ser traduzido
 
         Returns:
             Tuple (traduções, estatísticas)
@@ -175,68 +411,122 @@ class ClaudeClient:
 
             glossary_text += "\n" + "="*80 + "\n"
 
+        # Adicionar proteção para nome da empresa
+        company_protection = ""
+        if company_name and company_name.strip():
+            # Extrair palavras individuais do nome da empresa
+            company_words = [w.strip() for w in company_name.split() if len(w.strip()) > 2]
+
+            company_protection = f"\n\n" + "🚨"*50 + "\n"
+            company_protection += "⛔ COMPANY NAME PROTECTION - CRITICAL RULES ⛔\n"
+            company_protection += "🚨"*50 + "\n"
+            company_protection += f"PROTECTED COMPANY NAME: {company_name}\n"
+            company_protection += f"PROTECTED WORDS (when appearing ALONE): {', '.join(company_words)}\n\n"
+
+            company_protection += "RULE 1 - FULL COMPANY NAME:\n"
+            company_protection += f"• When you find '{company_name}' (complete or partial), keep it EXACTLY as is\n"
+            company_protection += f"• NEVER translate any part of '{company_name}'\n\n"
+
+            company_protection += "RULE 2 - INDIVIDUAL WORDS (TOKENS):\n"
+            company_protection += f"• Protected words: {', '.join(company_words)}\n"
+            company_protection += f"• If ANY of these words appears ALONE in a token (without other context), DO NOT translate it\n"
+            company_protection += f"• If these words appear WITH CONTEXT in a sentence, you MAY translate them normally\n"
+            company_protection += f"• EXCEPTION: If protected words appear in EMAILS, URLS, or CODES, keep them INTACT\n\n"
+
+            company_protection += "EXAMPLES:\n"
+            # Exemplo com palavra isolada
+            if company_words:
+                example_word = company_words[0]
+                company_protection += f"  ✓ Token alone: \"{example_word}\" → \"{example_word}\" (NO TRANSLATION)\n"
+                company_protection += f"  ✓ With context: \"The {example_word.lower()} was successful\" → \"O {example_word.lower()} foi bem-sucedido\" (TRANSLATE)\n"
+                company_protection += f"  ✓ In email: \"user@{example_word.lower()}.com\" → \"user@{example_word.lower()}.com\" (KEEP INTACT)\n"
+
+            company_protection += f"  ✓ Full name: \"{company_name}\" → \"{company_name}\" (NEVER TRANSLATE)\n"
+            company_protection += "🚨"*50 + "\n"
+
         # System prompt com cache (dicionário será cacheado)
-        system_prompt = f"""Você é um tradutor profissional especializado em documentos contratuais e técnicos.
-Traduza de {source} para {target} com precisão técnica e legal.
+        system_prompt = f"""You are a professional translator specialized in contractual and technical documents.
+Translate from {source} to {target} with technical and legal precision.
 
-IMPORTANTE: Retorne APENAS JSON válido, sem texto antes ou depois.
+🔴🔴🔴 ABSOLUTE RULE: YOUR RESPONSE = ONLY PURE JSON 🔴🔴🔴
 
-FORMATO OBRIGATÓRIO:
+YOUR COMPLETE RESPONSE MUST BE:
+{{
+  "translations": [...]
+}}
+
+❌ DO NOT WRITE IN YOUR RESPONSE:
+- Comments like "validation completed"
+- Explanations
+- Confirmations
+- Check mark emojis
+- Validation checklists
+- NOTHING except the JSON
+
+✅ VALIDATION (DO MENTALLY, DO NOT WRITE):
+Before returning, validate MENTALLY (do not write this):
+1. I counted {len(tokens)} locations → I must return {len(tokens)} translations
+2. There are {len(tokens)-1} commas between the {len(tokens)} objects
+3. All quotes are closed
+4. Last line ends with: ]}}
+
+❌ COMMON ERRORS (AVOID THESE):
+- Triple quotes: \\"\\"\\" → use only \\"
+- Parentheses after quotes: "text") → use only "text"}}
+- Missing commas: }}}}\n{{{{ → use }}}},\n{{{{
+- Semicolons: "; → use only "
+- Unclosed strings: "text → use "text"
+
+REQUIRED FORMAT (NO VARIATIONS):
 {{
   "translations": [
-    {{"location": "LOC1", "translation": "texto traduzido aqui"}},
-    {{"location": "LOC2", "translation": "outro texto traduzido"}}
+    {{"location": "LOC1", "translation": "translated text here"}},
+    {{"location": "LOC2", "translation": "another translated text"}}
   ]
 }}
 
-REGRAS DE ESCAPE (CRÍTICO):
-1. Aspas duplas dentro do texto → use \\"
-   Exemplo: {{"translation": "Ele disse \\"olá\\""}}
+JSON ESCAPE RULES (MEMORIZE):
+1. Double quotes inside text → \\" (ONE backslash, TWO quotes)
+    CORRECT: {{"translation": "He said \\"hello\\""}}
+    WRONG: {{"translation": "He said \\"\\"\\"hello\\"\\"\\""}}
 
-2. Barras invertidas → use \\\\
-   Exemplo: {{"translation": "C:\\\\Users\\\\pasta"}}
+2. Backslashes → \\\\
+    CORRECT: {{"translation": "C:\\\\Users\\\\folder"}}
 
-3. Quebras de linha → use \\n (não quebrar linha real)
-   Exemplo: {{"translation": "Linha 1\\nLinha 2"}}
+3. Line breaks → \\n
+   CORRECT: {{"translation": "Line 1\\nLine 2"}}
 
-4. NUNCA deixe strings abertas - sempre feche com "
+4. DO NOT add characters OUTSIDE quotes
+    CORRECT: {{"translation": "text"}}
+    WRONG: {{"translation": "text")}}
+    WRONG: {{"translation": "text";}}
+5. Commas between objects (ALWAYS)
+    CORRECT: {{"location": "T1", "translation": "a"}},
+              {{"location": "T2", "translation": "b"}}
+    WRONG: {{"location": "T1", "translation": "a"}}
+              {{"location": "T2", "translation": "b"}}
 
-EXEMPLO COMPLETO:
-Input: [{{"location": "A", "text": "Hello \\"World\\""}}, {{"location": "B", "text": "Line 1\\nLine 2"}}]
-Output: {{
-  "translations": [
-    {{"location": "A", "translation": "Olá \\"Mundo\\""}},
-    {{"location": "B", "translation": "Linha 1\\nLinha 2"}}
-  ]
-}}
+FINAL VALIDATION (DO MENTALLY):
+I counted {len(tokens)} locations → I must return {len(tokens)} translations
+ All quotes are closed
+ There are {len(tokens)-1} commas between the {len(tokens)} objects
+ Last line ends with ]}} (not ], not }}, ONLY ]}})
+No extra characters after " (no ), no ;, no .)
 
-REGRAS DE TRADUÇÃO:
-1. SEMPRE consulte o glossário primeiro antes de traduzir qualquer termo
-2. Use EXATAMENTE as traduções do glossário quando encontrar os termos
-3. Mantenha formatação original (maiúsculas, minúsculas, pontuação)
-4. Preserve números, datas, códigos de referência, NIUTs
-5. Siglas: mantenha conforme glossário (ex: "VAT" → "IVA", "TAX ID" → "NUIT")
-6. Abreviações: aplique conforme glossário (ex: "Tel. No." → "Tel.")
-7. Expressões contratuais: use termos formais (ex: "shall be" → "deverá ser")
-8. Nomes de empresas e locais: adapte apenas quando especificado no glossário
-9. Mesma ORDEM dos textos originais
-10. Preserve estrutura e quebras de linha{glossary_text}
+TRANSLATION RULES:
+1. ALWAYS check the glossary first before translating any term
+2. Use EXACTLY the glossary translations when you find the terms
+3. Maintain original formatting (uppercase, lowercase, punctuation)
+4. Preserve numbers, dates, reference codes, NIUTs
+5. Same ORDER as the original texts{company_protection}{glossary_text}
 
-EXEMPLOS DE APLICAÇÃO DO GLOSSÁRIO:
-- "Purchase Order No. 31628809" → "Ordem de Compra n.º 31628809"
-- "TAX ID: 401015418" → "NUIT: 401015418"
-- "Tel. No.: +258843118753" → "Tel.: +258843118753"
-- "Vendor code: 172248" → "Código do Fornecedor: 172248"
-- "Subject: PROVISION OF MEDICAL SERVICES" → "Assunto: PROVISÃO DOS SERVIÇOS MÉDICOS"
-- "Our reference: Work Order No. 31628809" → "Nossa referência: Ordem de Serviço n.º 31628809"
-
-ATENÇÃO CRÍTICA:
-- JSON inválido = erro fatal. Valide mentalmente antes de enviar.
-- Glossário tem PRIORIDADE ABSOLUTA sobre qualquer outra regra de tradução.
-- Revise cada termo para garantir que está no glossário antes de usar tradução automática."""
+ CRITICAL: Invalid JSON = TOTAL FAILURE. Validate BEFORE returning!"""
 
         # Preparar tokens em JSON
         tokens_json = json.dumps(tokens, ensure_ascii=False, indent=2)
+
+        # LOG: Mostrar claramente quantos segmentos estamos enviando NESTA requisição
+        print(f"   Enviando {len(tokens)} segmentos numa ÚNICA requisição para Claude...")
 
         try:
             # Chamar Claude com cache no system prompt
@@ -258,6 +548,19 @@ ATENÇÃO CRÍTICA:
             # Extrair resposta
             response_text = message.content[0].text.strip()
 
+            # LOG: Mostrar que recebemos a resposta
+            print(f"   Resposta recebida do Claude para os {len(tokens)} segmentos")
+
+            # LIMPEZA AGRESSIVA: Extrair APENAS o JSON puro
+            # Remover TUDO antes de { e TUDO depois de }
+            import re
+            json_match = re.search(r'\{{.*\}}', response_text, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(0)
+                if cleaned != response_text:
+                    response_text = cleaned
+                    print(f"  🧹 Texto extra removido (antes/depois do JSON)")
+
             # Parse JSON da resposta
             try:
                 # Remover markdown code blocks se existirem
@@ -267,26 +570,141 @@ ATENÇÃO CRÍTICA:
 
                 result = json.loads(response_text)
                 translations = result.get("translations", [])
+
+                # VALIDAÇÃO: Remover traduções vazias
+                original_count = len(translations)
+                translations = [t for t in translations if t.get("translation", "").strip()]
+                removed = original_count - len(translations)
+                if removed > 0:
+                    print(f"⚠️ {removed} traduções vazias removidas automaticamente")
             except json.JSONDecodeError as e:
-                # Tentar consertar JSON comum: aspas simples ao invés de duplas
+                # AUTO-CORREÇÃO: Tentar consertar erros comuns de JSON
+                print(f" Erro JSON detectado, tentando auto-correção...")
+
+                fixed = response_text
+                corrections_made = []
+
                 try:
-                    # Substituir aspas simples por duplas (caso comum)
-                    fixed = response_text.replace("'", '"')
+                    # 1. Corrigir aspas triplas escapadas erradas: \""" → \"
+                    import re
+                    if r'\"""' in fixed:
+                        fixed = fixed.replace(r'\"""', r'\"')
+                        corrections_made.append("aspas triplas → aspas simples")
+
+                    # 2. Corrigir aspas duplas escapadas duplicadas: \\"" → \"
+                    if r'\\"' in fixed:
+                        fixed = re.sub(r'\\"', r'\"', fixed)
+                        corrections_made.append("aspas duplas escapadas duplicadas")
+
+                    # 3. Corrigir aspas simples ao invés de duplas (caso comum)
+                    if "'" in fixed and '"' not in fixed:
+                        fixed = fixed.replace("'", '"')
+                        corrections_made.append("aspas simples → duplas")
+
+                    # 4. Corrigir vírgulas faltantes entre objetos JSON
+                    # Padrão: }NEWLINE    { → },NEWLINE    {
+                    virgula_faltante = re.compile(r'\}\s*\n\s*\{')
+                    if virgula_faltante.search(fixed):
+                        fixed = virgula_faltante.sub(r'},\n    {', fixed)
+                        corrections_made.append("vírgulas faltantes entre objetos")
+
+                    # 5. Corrigir ponto e vírgula antes de chave de fechamento
+                    # Padrão: ";} → "}
+                    if '";}'in fixed or "';}" in fixed:
+                        fixed = fixed.replace('";}"', '"}').replace("';}'", "}")
+                        corrections_made.append("ponto e vírgula antes de }")
+
+                    # 6. Remover caracteres de controle inválidos (tabs, newlines dentro de strings)
+                    # Substituir tabs e newlines não escapados por espaços
+                    fixed = re.sub(r'(?<!\\)\t', ' ', fixed)  # Tab → espaço
+                    fixed = re.sub(r'(?<!\\)\r', '', fixed)   # Carriage return → remover
+                    # Newlines dentro de valores JSON (não entre objetos) → \n
+                    fixed = re.sub(r':\s*"([^"]*)\n([^"]*)"', r': "\1\\n\2"', fixed)
+
+                    # 7. Corrigir caracteres extras após aspas de fechamento
+                    # Padrão: "texto")  → "texto"}  ou  "texto"} → "texto"}
+                    # Remove qualquer caractere que não seja } após "
+                    fixed = re.sub(r'"\s*\)(\s*[,\]\}])', r'"\1', fixed)  # Remove ) após "
+                    fixed = re.sub(r'"\s*;(\s*[,\]\}])', r'"\1', fixed)   # Remove ; após "
+
+                    if any(pattern in response_text for pattern in ['")' , '";']):
+                        corrections_made.append("caracteres extras após aspas")
+
+                    # 8. CORREÇÃO: Escapar aspas não escapadas dentro de valores JSON
+                    # Problema: "translation": "texto "não escapado" aqui"
+                    # Solução: Processar cada linha procurando por padrão problemático
+                    lines_fixed = []
+                    aspas_corrigidas = False
+                    for line in fixed.split('\n'):
+                        # Procurar linhas com location ou translation
+                        if '"location":' in line or '"translation":' in line:
+                            # Contar aspas na linha (deveria ter 4: "key": "value")
+                            quote_count = line.count('"') - line.count('\\"') * 2
+                            if quote_count > 4:
+                                # Tem aspas extras! Escapar aspas dentro do valor
+                                # Encontrar o valor (depois de : ")
+                                if '": "' in line:
+                                    parts = line.split('": "', 1)
+                                    if len(parts) == 2:
+                                        key_part = parts[0] + '": "'
+                                        value_part = parts[1]
+                                        # Remover aspas de fechamento e vírgula do final
+                                        value_end = '"},' if value_part.endswith('"},') else '"}'
+                                        value_clean = value_part.rstrip('"},')
+                                        # Escapar aspas dentro do valor
+                                        value_escaped = value_clean.replace('"', '\\"')
+                                        line = key_part + value_escaped + value_end
+                                        aspas_corrigidas = True
+                        lines_fixed.append(line)
+
+                    if aspas_corrigidas:
+                        fixed = '\n'.join(lines_fixed)
+                        corrections_made.append("aspas não escapadas dentro de valores")
+
+                    # Tentar parsear após correções
                     result = json.loads(fixed)
                     translations = result.get("translations", [])
+
+                    # VALIDAÇÃO: Remover traduções vazias (após auto-correção)
+                    original_count = len(translations)
+                    translations = [t for t in translations if t.get("translation", "").strip()]
+                    removed = original_count - len(translations)
+                    if removed > 0:
+                        print(f"⚠️ {removed} traduções vazias removidas automaticamente")
+
+                    if corrections_made:
+                        print(f" JSON corrigido automaticamente: {', '.join(corrections_made)}")
+
                 except:
-                    # Salvar JSON bruto em arquivo para análise
+                    # Salvar JSON bruto NO PROJETO para análise
                     import os
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', prefix='claude_error_', encoding='utf-8') as f:
+                    from datetime import datetime
+
+                    # Criar pasta de erros JSON no projeto
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    error_dir = os.path.join(project_root, "claude_json_errors")
+                    os.makedirs(error_dir, exist_ok=True)
+
+                    # Nome do arquivo com timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    error_file = os.path.join(error_dir, f"claude_error_{timestamp}.json")
+
+                    # Salvar JSON bruto
+                    with open(error_file, 'w', encoding='utf-8') as f:
                         f.write(response_text)
-                        error_file = f.name
+
+                    print(f"\n{'='*80}")
+                    print(f" ERRO JSON SALVO PARA ANÁLISE:")
+                    print(f"   Arquivo: {error_file}")
+                    print(f"   Tamanho: {len(response_text)} caracteres")
+                    print(f"   Erro: {str(e)}")
+                    print(f"{'='*80}\n")
 
                     # Se ainda falhar, mostrar erro detalhado
                     error_msg = f"Erro ao fazer parse da resposta Claude: {str(e)}\n\n"
                     error_msg += f"Resposta recebida (primeiros 1000 chars):\n{response_text[:1000]}\n\n"
-                    error_msg += f"JSON bruto salvo em: {error_file}\n\n"
-                    error_msg += "DICA: O Claude retornou JSON inválido. Tente novamente ou use um modelo diferente."
+                    error_msg += f"🗂️ JSON COMPLETO salvo em:\n{error_file}\n\n"
+                    error_msg += "💡 Analise o JSON salvo para criar algoritmo de correção eficaz."
                     raise Exception(error_msg)
 
             # Calcular estatísticas de uso
@@ -310,10 +728,10 @@ ATENÇÃO CRÍTICA:
                 available_models = ", ".join(self.VALID_MODELS[:3])  # Mostrar apenas os principais
                 raise Exception(
                     f"Erro 404 - Modelo não encontrado: '{self.model}'\n\n"
-                    f"Modelos principais disponíveis:\n"
-                    f"- claude-3-5-sonnet-20241022 (Mais recente, recomendado)\n"
-                    f"- claude-3-opus-20240229 (Mais poderoso)\n"
-                    f"- claude-3-haiku-20240307 (Mais rápido)\n\n"
+                    f"Modelos principais disponíveis (2026):\n"
+                    f"- claude-sonnet-4-5-20250929 (Mais moderno, recomendado)\n"
+                    f"- claude-opus-4-5-20251101 (Mais poderoso)\n"
+                    f"- claude-haiku-4-5-20251001 (Mais rápido)\n\n"
                     f"Vá para a aba '🤖 Claude API' e selecione um modelo válido.\n\n"
                     f"Erro original: {error_str}"
                 )

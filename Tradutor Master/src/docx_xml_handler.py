@@ -60,13 +60,15 @@ class DocxXMLHandler:
 
         return tokens
 
-    def apply_translations(self, translation_map: Dict[str, str]) -> None:
+    def apply_translations(self, translation_map: Dict[str, str], reduce_font_size: bool = True) -> None:
         """
         Aplica traduções substituindo texto dos elementos <w:t>.
         Preserva ABSOLUTAMENTE TODA a estrutura XML.
+        Opcionalmente reduz tamanho da fonte em 1pt para garantir layout.
 
         Args:
             translation_map: {location: translated_text}
+            reduce_font_size: Se deve reduzir fonte em 1pt (padrão: True)
         """
         # Iterar sobre todos os elementos <w:t>
         for idx, t_elem in enumerate(self.root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')):
@@ -82,6 +84,59 @@ class DocxXMLHandler:
                 # Preservar atributo xml:space se necessário
                 if translated_text.startswith(' ') or translated_text.endswith(' ') or '  ' in translated_text:
                     t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+
+                # REDUZIR tamanho da fonte em 1pt para garantir layout
+                if reduce_font_size:
+                    self._reduce_font_size(t_elem)
+
+    def _reduce_font_size(self, t_elem: ET.Element) -> None:
+        """
+        Reduz tamanho da fonte do elemento <w:t> em 1pt.
+        Busca o elemento <w:rPr> (run properties) que contém <w:sz> (font size).
+        """
+        # Encontrar o elemento <w:r> (run) pai do <w:t>
+        run = t_elem.getparent()
+        if run is None:
+            return
+
+        # Procurar ou criar <w:rPr> (run properties)
+        rPr = run.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr')
+
+        if rPr is None:
+            # Criar <w:rPr> se não existir
+            rPr = ET.Element('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr')
+            run.insert(0, rPr)  # Inserir no início do <w:r>
+
+        # Procurar <w:sz> (font size) e <w:szCs> (complex script font size)
+        sz = rPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz')
+        szCs = rPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}szCs')
+
+        # Processar <w:sz>
+        if sz is not None:
+            current_size = sz.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+            if current_size:
+                # Tamanho em half-points (1pt = 2 half-points)
+                # Reduzir 1pt = subtrair 2 half-points
+                new_size = max(2, int(current_size) - 2)  # Mínimo 1pt (2 half-points)
+                sz.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', str(new_size))
+        else:
+            # Se não tem <w:sz>, criar com valor padrão reduzido
+            # Padrão Word: 22 half-points (11pt) → Reduzir para 20 (10pt)
+            sz = ET.Element('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz')
+            sz.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '20')  # 10pt
+            rPr.append(sz)
+
+        # Processar <w:szCs> (complex script - idiomas como árabe, hebraico)
+        if szCs is not None:
+            current_size_cs = szCs.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+            if current_size_cs:
+                new_size_cs = max(2, int(current_size_cs) - 2)
+                szCs.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', str(new_size_cs))
+        else:
+            # Criar <w:szCs> com mesmo valor de <w:sz>
+            szCs = ET.Element('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}szCs')
+            szCs.set('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '20')  # 10pt
+            rPr.append(szCs)
 
     def save(self, output_path: str) -> None:
         """Salva documento modificado preservando TODA a estrutura."""

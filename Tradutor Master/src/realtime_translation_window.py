@@ -23,7 +23,13 @@ class RealTimeTranslationWindow:
         tokens: List[Token],
         translate_func: Callable[[List[str]], List[str]],
         on_complete: Callable[[List[Token]], None],
-        file_name: str = "Documento"
+        file_name: str = "Documento",
+        history_manager=None,
+        translation_id: str = None,
+        source_lang: str = "en",
+        target_lang: str = "pt",
+        output_dir: str = "",
+        file_path: str = ""
     ):
         """
         Args:
@@ -32,6 +38,12 @@ class RealTimeTranslationWindow:
             translate_func: Função (textos) -> traduções que traduz lista de textos
             on_complete: Callback chamado quando tradução completa (recebe tokens editados)
             file_name: Nome do arquivo sendo traduzido
+            history_manager: Gerenciador de histórico (opcional)
+            translation_id: ID da tradução no histórico (opcional)
+            source_lang: Idioma de origem
+            target_lang: Idioma de destino
+            output_dir: Diretório de saída
+            file_path: Caminho completo do arquivo
         """
         self.tokens = tokens
         self.translate_func = translate_func
@@ -39,6 +51,16 @@ class RealTimeTranslationWindow:
         self.file_name = file_name
         self.completed = False
         self.translation_running = False
+
+        # Histórico
+        self.history_manager = history_manager
+        self.translation_id = translation_id
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.output_dir = output_dir
+        self.file_path = file_path
+        self.total_tokens = len(tokens)
+        self.translated_tokens = 0
 
         # Mapa de iid -> token para facilitar atualização
         self.item_map: Dict[str, Token] = {}
@@ -152,6 +174,16 @@ class RealTimeTranslationWindow:
         # Bind duplo clique para editar
         self.tree.bind("<Double-1>", self._on_double_click)
 
+        # Criar entrada no histórico se não existir
+        if self.history_manager and not self.translation_id:
+            self.translation_id = self.history_manager.create_translation(
+                source_lang=self.source_lang,
+                target_lang=self.target_lang,
+                files=[self.file_path] if self.file_path else [self.file_name],
+                total_tokens=self.total_tokens,
+                output_dir=self.output_dir
+            )
+
         # Frame inferior - botões
         btn_frame = ttk.Frame(self.window, padding=10)
         btn_frame.pack(fill=tk.X)
@@ -196,19 +228,25 @@ class RealTimeTranslationWindow:
                     self._finish_translation()
                     return
 
-                # Traduzir um por um para mostrar progresso
-                for i, text in enumerate(texts_to_translate):
+                # TRADUZIR TODOS DE UMA VEZ (batches massivos)
+                # A função translate_func já cuida de dividir em batches otimizados internamente
+                print(f"\n🚀 Traduzindo {len(texts_to_translate)} segmentos em batches massivos...")
+
+                # Marcar todos como "Traduzindo..."
+                for i, token_idx in enumerate(token_indices):
+                    token = self.tokens[token_idx]
+                    self._update_token_status(token, "🔄 Traduzindo...")
+
+                # Traduzir TODOS de uma vez (Claude divide em batches internamente)
+                translations = self.translate_func(texts_to_translate)
+
+                # Processar resultados e atualizar interface
+                for i, translation in enumerate(translations):
                     if not self.translation_running:
                         break  # Usuário cancelou
 
                     token_idx = token_indices[i]
                     token = self.tokens[token_idx]
-
-                    # Atualizar status para "Traduzindo..."
-                    self._update_token_status(token, "🔄 Traduzindo...")
-
-                    # Traduzir
-                    translation = self.translate_func([text])[0]
 
                     # Garantir que translation é string
                     if isinstance(translation, list):
@@ -223,7 +261,15 @@ class RealTimeTranslationWindow:
 
                     # Atualizar progresso
                     progress = i + 1
+                    self.translated_tokens = progress
                     self._update_progress(progress, len(texts_to_translate))
+
+                    # Atualizar histórico a cada 100 traduções (reduzido de 10 para evitar overhead)
+                    if self.history_manager and self.translation_id and progress % 100 == 0:
+                        self.history_manager.update_translation(
+                            self.translation_id,
+                            translated_tokens=self.translated_tokens
+                        )
 
                 # Terminar
                 if self.translation_running:
@@ -291,6 +337,10 @@ class RealTimeTranslationWindow:
         """Finaliza tradução e habilita botão de concluir (thread-safe)"""
         self.translation_running = False
 
+        # Marcar como completa no histórico
+        if self.history_manager and self.translation_id:
+            self.history_manager.complete_translation(self.translation_id)
+
         def update():
             try:
                 self.cancel_btn.config(state=tk.DISABLED)
@@ -324,6 +374,11 @@ class RealTimeTranslationWindow:
         """Mostra erro (thread-safe)"""
         def update():
             self.translation_running = False
+
+            # Marcar como falha no histórico
+            if self.history_manager and self.translation_id:
+                self.history_manager.fail_translation(self.translation_id, error_msg)
+
             messagebox.showerror("Erro na Tradução", error_msg)
             self.window.grab_release()
             self.window.destroy()

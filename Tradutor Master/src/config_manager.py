@@ -55,7 +55,7 @@ class ConfigManager:
         return {
             # Claude/Anthropic
             "claude_api_key": "",
-            "claude_model": "claude-3-5-sonnet-20241022",
+            "claude_model": "claude-sonnet-4-5-20250929",
 
             # LibreTranslate
             "libretranslate_url": "http://102.211.186.44/translate",
@@ -77,6 +77,10 @@ class ConfigManager:
             "auto_glossary": False,
             "default_source_lang": "en",
             "default_target_lang": "pt",
+
+            # Nome da empresa (NUNCA traduzir)
+            "company_name": "",  # Nome da empresa que aparece nos documentos
+            "extract_company_from_filename": True,  # Extrair nome da empresa do arquivo automaticamente
 
             # UI
             "window_width": 1200,

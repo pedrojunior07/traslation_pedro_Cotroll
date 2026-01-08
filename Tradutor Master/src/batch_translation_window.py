@@ -26,7 +26,12 @@ class BatchTranslationWindow:
         translate_func: Callable[[str, List[str]], List[str]],
         on_complete: Callable[[List[Tuple[str, List[Token]]]], None],
         progress_file: str = "translation_progress.json",
-        auto_save: bool = True
+        auto_save: bool = True,
+        history_manager=None,
+        translation_id: str = None,
+        source_lang: str = "en",
+        target_lang: str = "pt",
+        output_dir: str = ""
     ):
         """
         Args:
@@ -36,6 +41,11 @@ class BatchTranslationWindow:
             on_complete: Callback quando completo (recebe lista de (file_path, tokens))
             progress_file: Arquivo para salvar progresso
             auto_save: Se True, salva e exporta automaticamente ao concluir
+            history_manager: Gerenciador de histórico (opcional)
+            translation_id: ID da tradução no histórico (opcional)
+            source_lang: Idioma de origem
+            target_lang: Idioma de destino
+            output_dir: Diretório de saída
         """
         self.files_and_tokens = files_and_tokens
         self.translate_func = translate_func
@@ -46,6 +56,13 @@ class BatchTranslationWindow:
         self.translation_running = False
         self.translation_paused = False
 
+        # Histórico
+        self.history_manager = history_manager
+        self.translation_id = translation_id
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.output_dir = output_dir
+
         # Estado do progresso
         self.current_file_idx = 0
         self.current_token_idx = 0
@@ -55,16 +72,27 @@ class BatchTranslationWindow:
         # Tentar carregar progresso anterior
         self._load_progress()
 
+        # Criar entrada no histórico se não existir
+        if self.history_manager and not self.translation_id:
+            files = [file_path for file_path, _ in files_and_tokens]
+            self.translation_id = self.history_manager.create_translation(
+                source_lang=source_lang,
+                target_lang=target_lang,
+                files=files,
+                total_tokens=self.total_tokens,
+                output_dir=output_dir
+            )
+
         # Criar janela
         self.window = tk.Toplevel(parent)
         self.window.title(f"Tradução em Batch - {len(files_and_tokens)} arquivos")
-        self.window.geometry("900x600")
+        self.window.geometry("1200x700")
 
         # Centralizar
         self.window.update_idletasks()
-        x = (self.window.winfo_screenwidth() // 2) - (900 // 2)
-        y = (self.window.winfo_screenheight() // 2) - (600 // 2)
-        self.window.geometry(f"900x600+{x}+{y}")
+        x = (self.window.winfo_screenwidth() // 2) - (1200 // 2)
+        y = (self.window.winfo_screenheight() // 2) - (700 // 2)
+        self.window.geometry(f"1200x700+{x}+{y}")
 
         # Tornar modal
         self.window.transient(parent)
@@ -97,9 +125,13 @@ class BatchTranslationWindow:
             foreground="#666666"
         ).pack(anchor=tk.W)
 
-        # Frame central - progresso geral
-        progress_frame = ttk.LabelFrame(self.window, text="Progresso Geral", padding=20)
-        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        # Frame central dividido - progresso + visualização
+        center_paned = ttk.PanedWindow(self.window, orient=tk.HORIZONTAL)
+        center_paned.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+        # Frame esquerdo - progresso geral
+        progress_frame = ttk.LabelFrame(center_paned, text="Progresso Geral", padding=15)
+        center_paned.add(progress_frame, weight=1)
 
         # Progresso geral
         self.overall_label = ttk.Label(
@@ -139,32 +171,35 @@ class BatchTranslationWindow:
         self.file_progress = ttk.Progressbar(
             progress_frame,
             mode="determinate",
-            length=600
+            length=400
         )
         self.file_progress.pack()
 
-        # Lista de arquivos
-        files_frame = ttk.LabelFrame(self.window, text="Arquivos", padding=10)
-        files_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+        # Lista de arquivos (dentro do progress_frame)
+        files_label = ttk.Label(progress_frame, text="Arquivos:", font=("Arial", 10, "bold"))
+        files_label.pack(anchor=tk.W, pady=(15, 5))
+
+        files_tree_frame = ttk.Frame(progress_frame)
+        files_tree_frame.pack(fill=tk.BOTH, expand=True)
 
         # Treeview de arquivos
         columns = ("status", "file", "tokens")
         self.files_tree = ttk.Treeview(
-            files_frame,
+            files_tree_frame,
             columns=columns,
             show="headings",
-            height=8
+            height=6
         )
 
         self.files_tree.heading("status", text="Status")
         self.files_tree.heading("file", text="Arquivo")
-        self.files_tree.heading("tokens", text="Segmentos")
+        self.files_tree.heading("tokens", text="Seg.")
 
-        self.files_tree.column("status", width=120)
-        self.files_tree.column("file", width=500)
-        self.files_tree.column("tokens", width=100)
+        self.files_tree.column("status", width=100)
+        self.files_tree.column("file", width=220)
+        self.files_tree.column("tokens", width=50)
 
-        vsb = ttk.Scrollbar(files_frame, orient="vertical", command=self.files_tree.yview)
+        vsb = ttk.Scrollbar(files_tree_frame, orient="vertical", command=self.files_tree.yview)
         self.files_tree.configure(yscrollcommand=vsb.set)
 
         self.files_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -184,6 +219,55 @@ class BatchTranslationWindow:
                 values=(status, file_name, len(tokens))
             )
             self.file_items[idx] = iid
+
+        # Frame direito - visualização da tradução em tempo real
+        token_frame = ttk.LabelFrame(center_paned, text="Tradução em Tempo Real", padding=15)
+        center_paned.add(token_frame, weight=1)
+
+        # Informação do token atual
+        self.current_token_label = ttk.Label(
+            token_frame,
+            text="Aguardando início...",
+            font=("Arial", 9, "bold"),
+            foreground="#0066cc"
+        )
+        self.current_token_label.pack(anchor=tk.W, pady=(0, 10))
+
+        # Frame com scrollbar para texto original e tradução
+        token_scroll_frame = ttk.Frame(token_frame)
+        token_scroll_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Texto original
+        original_label = ttk.Label(token_scroll_frame, text="Original:", font=("Arial", 9, "bold"))
+        original_label.pack(anchor=tk.W, pady=(0, 3))
+
+        self.original_text = tk.Text(
+            token_scroll_frame,
+            height=8,
+            wrap=tk.WORD,
+            font=("Arial", 9),
+            bg="#f5f5f5",
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        self.original_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.original_text.config(state=tk.DISABLED)
+
+        # Texto traduzido
+        translation_label = ttk.Label(token_scroll_frame, text="Tradução:", font=("Arial", 9, "bold"))
+        translation_label.pack(anchor=tk.W, pady=(0, 3))
+
+        self.translation_text = tk.Text(
+            token_scroll_frame,
+            height=8,
+            wrap=tk.WORD,
+            font=("Arial", 9),
+            bg="#e8f5e9",
+            relief=tk.SOLID,
+            borderwidth=1
+        )
+        self.translation_text.pack(fill=tk.BOTH, expand=True)
+        self.translation_text.config(state=tk.DISABLED)
 
         # Frame inferior - botões
         btn_frame = ttk.Frame(self.window, padding=20)
@@ -261,6 +345,16 @@ class BatchTranslationWindow:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
             print(f"💾 Progresso salvo: arquivo {self.current_file_idx+1}, token {self.current_token_idx}")
+
+            # Atualizar histórico
+            if self.history_manager and self.translation_id:
+                self.history_manager.update_translation(
+                    self.translation_id,
+                    translated_tokens=self.translated_tokens,
+                    current_file_idx=self.current_file_idx,
+                    progress_data=data
+                )
+
         except Exception as e:
             print(f"⚠ Erro ao salvar progresso: {e}")
 
@@ -287,35 +381,62 @@ class BatchTranslationWindow:
                     self.file_progress["maximum"] = len(tokens)
                     self.file_progress["value"] = self.current_token_idx if file_idx == self.current_file_idx else 0
 
-                    # Traduzir tokens um por um
-                    start_idx = self.current_token_idx if file_idx == self.current_file_idx else 0
-                    for token_idx in range(start_idx, len(tokens)):
-                        # Verificar pausa
-                        while self.translation_paused and self.translation_running:
-                            threading.Event().wait(0.1)
+                    # OTIMIZAÇÃO: Traduzir TODOS os tokens do arquivo DE UMA VEZ
+                    # Coletar todos os textos para tradução em batch
+                    texts_to_translate = []
+                    token_indices = []
 
-                        if not self.translation_running:
-                            break
-
-                        token = tokens[token_idx]
-
+                    for token_idx, token in enumerate(tokens):
                         if not token.skip and token.text.strip():
-                            # Traduzir
-                            translation_result = self.translate_func(file_path, [token.text])
-                            
-                            # Garantir que translation é string, não lista
-                            if isinstance(translation_result, list):
-                                translation = translation_result[0] if translation_result else ""
+                            texts_to_translate.append(token.text)
+                            token_indices.append(token_idx)
+
+                    # Traduzir todos de uma vez (batch otimizado)
+                    if texts_to_translate:
+                        # Mostrar que iniciou tradução do arquivo
+                        self._update_token_display(
+                            file_name,
+                            "BATCH",
+                            f"Traduzindo {len(texts_to_translate)} segmentos...",
+                            "⏳ Aguarde..."
+                        )
+
+                        # CHAMADA ÚNICA para todo o arquivo
+                        translations = self.translate_func(file_path, texts_to_translate)
+
+                        # Distribuir traduções de volta aos tokens
+                        for idx, token_idx in enumerate(token_indices):
+                            # Verificar pausa
+                            while self.translation_paused and self.translation_running:
+                                threading.Event().wait(0.1)
+
+                            if not self.translation_running:
+                                break
+
+                            token = tokens[token_idx]
+
+                            # Obter tradução
+                            if idx < len(translations):
+                                translation = translations[idx]
+
+                                # Garantir que translation é string
+                                if isinstance(translation, list):
+                                    translation = translation[0] if translation else ""
+                                elif not isinstance(translation, str):
+                                    translation = str(translation) if translation else ""
+
+                                token.translation = translation
                             else:
-                                translation = translation_result
-                            
-                            # Garantir que translation é string
-                            if isinstance(translation, list):
-                                translation = translation[0] if translation else ""
-                            elif not isinstance(translation, str):
-                                translation = str(translation) if translation else ""
-                            
-                            token.translation = translation
+                                # Tradução faltando (não deveria acontecer)
+                                token.translation = f"[ERRO: Tradução faltando para {token.location}]"
+
+                            # Mostrar tradução completa
+                            self._update_token_display(
+                                file_name,
+                                token.location,
+                                token.text,
+                                token.translation
+                            )
 
                             # Atualizar progresso
                             self.current_token_idx = token_idx + 1
@@ -402,20 +523,46 @@ class BatchTranslationWindow:
 
         self.window.after(0, update)
 
+    def _update_token_display(self, file_name: str, token_location: str, original_text: str, translation_text: str):
+        """Atualiza visualização do token atual sendo traduzido (thread-safe)"""
+        def update():
+            # Atualizar label do token
+            self.current_token_label.config(
+                text=f"📄 {file_name} → [{token_location}]"
+            )
+
+            # Atualizar texto original
+            self.original_text.config(state=tk.NORMAL)
+            self.original_text.delete("1.0", tk.END)
+            self.original_text.insert("1.0", original_text)
+            self.original_text.config(state=tk.DISABLED)
+
+            # Atualizar tradução
+            self.translation_text.config(state=tk.NORMAL)
+            self.translation_text.delete("1.0", tk.END)
+            self.translation_text.insert("1.0", translation_text)
+            self.translation_text.config(state=tk.DISABLED)
+
+        self.window.after(0, update)
+
     def _finish_translation(self):
         """Finaliza tradução (thread-safe)"""
         def update():
             self.translation_running = False
             self.pause_btn.config(state=tk.DISABLED)
-            
+
             # Deletar arquivo de progresso
             if os.path.exists(self.progress_file):
                 os.remove(self.progress_file)
-            
+
+            # Marcar como completa no histórico
+            if self.history_manager and self.translation_id:
+                self.history_manager.complete_translation(self.translation_id)
+
             if self.auto_save:
                 # Salvar e exportar automaticamente
                 self.complete_btn.config(state=tk.DISABLED, text="⏳ Salvando...")
-                
+
                 # Agendar exportação para depois (garantir que tradução terminou)
                 self.window.after(500, self._auto_export)
             else:
@@ -461,6 +608,11 @@ class BatchTranslationWindow:
         def update():
             self.translation_running = False
             self._save_progress()
+
+            # Marcar como falha no histórico
+            if self.history_manager and self.translation_id:
+                self.history_manager.fail_translation(self.translation_id, error_msg)
+
             messagebox.showerror(
                 "Erro na Tradução",
                 f"{error_msg}\n\n"

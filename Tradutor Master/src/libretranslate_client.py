@@ -40,8 +40,8 @@ class LibreTranslateClient:
         if glossary:
             self.set_glossary(glossary)
 
-        # Sempre ativar pós-processador para correções de formatação
-        self.post_processor = DocumentPostProcessor()
+        # Pós-processador (será inicializado apenas se necessário)
+        self.post_processor = None
 
     def set_glossary(self, glossary: Dict[str, str]) -> None:
         """
@@ -55,6 +55,12 @@ class LibreTranslateClient:
             print(f"  ℹ Glossário ativado com {len(glossary)} termos")
         else:
             self.glossary_processor = None
+
+    def enable_post_processing(self) -> None:
+        """Ativa pós-processamento de formatação CCS JV"""
+        if not self.post_processor:
+            self.post_processor = DocumentPostProcessor()
+            print(f"  ℹ Pós-processamento CCS JV ativado")
 
     def translate(self, text: str, source: str, target: str) -> str:
         """
@@ -94,10 +100,11 @@ class LibreTranslateClient:
             if self.glossary_processor:
                 translated, _ = self.glossary_processor.apply_to_text(translated)
 
-            # SEMPRE aplicar pós-processamento de formatação CCS JV
-            translated, corrections = self.post_processor.process_text(translated)
-            if corrections > 0:
-                print(f"  ✓ Pós-processamento aplicou {corrections} correções")
+            # Aplicar pós-processamento se ativo
+            if self.post_processor:
+                translated, corrections = self.post_processor.process_text(translated)
+                if corrections > 0:
+                    print(f"  ✓ Pós-processamento aplicou {corrections} correções")
 
             return translated
         except requests.exceptions.Timeout:
@@ -232,10 +239,11 @@ class LibreTranslateClient:
                     if subs_dict:
                         print(f"  ✓ Glossário aplicou {sum(len(subs) for subs in subs_dict.values())} substituições")
 
-                # SEMPRE aplicar pós-processamento de formatação CCS JV
-                translations, total_corrections = self.post_processor.process_batch(translations)
-                if total_corrections > 0:
-                    print(f"  ✓ Pós-processamento aplicou {total_corrections} correções")
+                # Aplicar pós-processamento se ativo
+                if self.post_processor:
+                    translations, total_corrections = self.post_processor.process_batch(translations)
+                    if total_corrections > 0:
+                        print(f"  ✓ Pós-processamento aplicou {total_corrections} correções")
 
                 return translations
             else:

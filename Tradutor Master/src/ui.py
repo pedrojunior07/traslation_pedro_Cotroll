@@ -26,6 +26,8 @@ try:
     from .review_window import ReviewWindow
     from .realtime_translation_window import RealTimeTranslationWindow
     from .batch_translation_window import BatchTranslationWindow
+    from .pdf_conversion_window import PDFConversionWindow
+    from .history_manager import HistoryManager
 except ImportError:
     from extractor import extract_tokens
     from token_guard import TokenGuard
@@ -40,6 +42,8 @@ except ImportError:
     from review_window import ReviewWindow
     from realtime_translation_window import RealTimeTranslationWindow
     from batch_translation_window import BatchTranslationWindow
+    from pdf_conversion_window import PDFConversionWindow
+    from history_manager import HistoryManager
 
 
 class TranslatorUI:
@@ -65,6 +69,7 @@ class TranslatorUI:
         self.claude_client: Optional[ClaudeClient] = None
         self.db: Optional[Database] = None
         self.cache = TranslationCache()
+        self.history_manager = HistoryManager()
 
         # Variáveis de estado
         self.source_var = tk.StringVar(value=self.config.get("default_source_lang", "en"))
@@ -176,10 +181,13 @@ class TranslatorUI:
         # Aba 3: Monitoramento
         self._create_monitoring_tab()
 
-        # Aba 4: Dicionário
+        # Aba 4: Histórico
+        self._create_history_tab()
+
+        # Aba 5: Dicionário
         self._create_dictionary_tab()
 
-        # Aba 5: Preferências
+        # Aba 6: Preferências
         self._create_preferences_tab()
 
     def _create_translation_tab(self) -> None:
@@ -346,11 +354,12 @@ class TranslatorUI:
             api_frame,
             textvariable=self.model_var,
             values=[
+                "claude-sonnet-4-5-20250929",
+                "claude-opus-4-5-20251101",
+                "claude-haiku-4-5-20251001",
                 "claude-3-5-sonnet-20241022",
-                "claude-3-5-sonnet-20240620",
                 "claude-3-opus-20240229",
-                "claude-3-sonnet-20240229",
-                "claude-3-haiku-20240307",
+                "claude-3-5-haiku-20241022",
             ],
             width=40,
             state="readonly",
@@ -438,6 +447,107 @@ Preços por 1 milhão de tokens."""
         ttk.Button(btn_frame, text="Exportar CSV", command=self.export_usage_csv).pack(
             side=tk.LEFT, padx=5
         )
+
+    def _create_history_tab(self) -> None:
+        """Aba de histórico de traduções"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="📜 Histórico")
+
+        # Estatísticas superiores
+        stats_frame = ttk.LabelFrame(tab, text="Estatísticas", padding=15)
+        stats_frame.pack(fill=tk.X, padx=20, pady=20)
+
+        self.stats_label = ttk.Label(stats_frame, text="Carregando estatísticas...")
+        self.stats_label.pack(anchor=tk.W, pady=5)
+
+        # Filtros
+        filter_frame = ttk.Frame(tab, padding=10)
+        filter_frame.pack(fill=tk.X, padx=20)
+
+        ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT, padx=5)
+        self.history_filter_var = tk.StringVar(value="Todos")
+        filter_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.history_filter_var,
+            values=["Todos", "Em Andamento", "Concluídas", "Falhadas"],
+            width=20,
+            state="readonly",
+        )
+        filter_combo.pack(side=tk.LEFT, padx=5)
+        filter_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_history())
+
+        ttk.Button(filter_frame, text="Atualizar", command=self.refresh_history).pack(
+            side=tk.LEFT, padx=10
+        )
+
+        # Tabela de histórico
+        history_list_frame = ttk.LabelFrame(tab, text="Traduções", padding=10)
+        history_list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+
+        # Treeview
+        columns = ("timestamp", "status", "langs", "files", "progress", "output")
+        self.history_tree = ttk.Treeview(
+            history_list_frame,
+            columns=columns,
+            show="headings",
+            height=15,
+        )
+        self.history_tree.heading("timestamp", text="Data/Hora")
+        self.history_tree.heading("status", text="Status")
+        self.history_tree.heading("langs", text="Idiomas")
+        self.history_tree.heading("files", text="Arquivos")
+        self.history_tree.heading("progress", text="Progresso")
+        self.history_tree.heading("output", text="Pasta Destino")
+
+        self.history_tree.column("timestamp", width=150, anchor=tk.W)
+        self.history_tree.column("status", width=120, anchor=tk.CENTER)
+        self.history_tree.column("langs", width=100, anchor=tk.CENTER)
+        self.history_tree.column("files", width=80, anchor=tk.CENTER)
+        self.history_tree.column("progress", width=150, anchor=tk.E)
+        self.history_tree.column("output", width=300, anchor=tk.W)
+
+        self.history_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scroll = ttk.Scrollbar(history_list_frame, orient=tk.VERTICAL, command=self.history_tree.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.history_tree.configure(yscrollcommand=scroll.set)
+
+        # Botões de ação
+        actions_frame = ttk.Frame(tab, padding=10)
+        actions_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+
+        ttk.Button(
+            actions_frame,
+            text="▶️ Retomar Selecionada",
+            command=self.resume_translation
+        ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            actions_frame,
+            text="📥 Baixar Arquivos",
+            command=self.download_translation_files
+        ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            actions_frame,
+            text="🗑 Remover Selecionada",
+            command=self.delete_selected_history
+        ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            actions_frame,
+            text="🧹 Limpar Concluídas",
+            command=self.clear_completed_history
+        ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            actions_frame,
+            text="📊 Exportar Relatório",
+            command=self.export_history_report
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Carregar dados iniciais
+        self.refresh_history()
 
     def _create_dictionary_tab(self) -> None:
         """Aba de gestão do dicionário"""
@@ -560,6 +670,56 @@ Preços por 1 milhão de tokens."""
         ttk.Entry(mysql_frame, textvariable=self.mysql_pass_var, width=20, show="*").grid(
             row=2, column=3, sticky=tk.W, padx=5, pady=5
         )
+
+        # Nome da Empresa (NUNCA traduzir)
+        company_frame = ttk.LabelFrame(tab, text="🏢 Proteção de Nome da Empresa", padding=15)
+        company_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+
+        info_label = ttk.Label(
+            company_frame,
+            text="⚠️ Configure o nome da sua empresa para NUNCA ser traduzido pelo Claude.\n"
+                 "Isso garante que o nome apareça corretamente em todos os documentos traduzidos.",
+            wraplength=700,
+            justify=tk.LEFT
+        )
+        info_label.pack(anchor=tk.W, pady=(0, 10))
+
+        # Frame para label e entrada na mesma linha
+        entry_frame = ttk.Frame(company_frame)
+        entry_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(entry_frame, text="Nome da Empresa:").pack(side=tk.LEFT, padx=5)
+        self.company_name_var = tk.StringVar(value=self.config.get("company_name", ""))
+        company_entry = ttk.Entry(entry_frame, textvariable=self.company_name_var, width=60)
+        company_entry.pack(side=tk.LEFT, padx=5)
+
+        example_label = ttk.Label(
+            company_frame,
+            text="Exemplo: 'ACME Corporation', 'Minha Empresa Lda', etc.",
+            foreground="#64748b",
+            font=("Bahnschrift", 9)
+        )
+        example_label.pack(anchor=tk.W, padx=10, pady=(0, 10))
+
+        # Checkbox para extrair nome do arquivo
+        self.extract_company_from_filename_var = tk.BooleanVar(value=self.config.get("extract_company_from_filename", True))
+        extract_check = ttk.Checkbutton(
+            company_frame,
+            text="📁 Extrair nome da empresa automaticamente do nome do arquivo",
+            variable=self.extract_company_from_filename_var
+        )
+        extract_check.pack(anchor=tk.W, padx=10, pady=(0, 5))
+
+        extract_help = ttk.Label(
+            company_frame,
+            text="Se ativado, o sistema extrai o nome da empresa do nome do arquivo\n"
+                 "(ex: 'CONTACT MOÇAMBIQUE AGÊNCIA PRIVADA LDA - 0031629360_001.docx' → protege 'CONTACT MOÇAMBIQUE AGÊNCIA PRIVADA LDA')",
+            foreground="#64748b",
+            font=("Bahnschrift", 9),
+            wraplength=700,
+            justify=tk.LEFT
+        )
+        extract_help.pack(anchor=tk.W, padx=25, pady=(0, 5))
 
         # Botão salvar
         save_frame = ttk.Frame(tab, padding=10)
@@ -760,6 +920,34 @@ Preços por 1 milhão de tokens."""
                 files, source_lang, target_lang, use_ai, dictionary, root_dir, output_dir
             )
 
+    def _extract_company_name_from_filename(self, file_path: str) -> str:
+        """
+        Extrai o nome da empresa do nome do arquivo.
+
+        Exemplos:
+        - "CONTACT MOÇAMBIQUE AGÊNCIA PRIVADA DE EMPREGO LDA - 0031629360_001.docx"
+          → "CONTACT MOÇAMBIQUE AGÊNCIA PRIVADA DE EMPREGO LDA"
+        - "KERRY PROJECT LOGISTICS MOZAMBIQUE LDA - 0031620659_000.docx"
+          → "KERRY PROJECT LOGISTICS MOZAMBIQUE LDA"
+        """
+        import re
+
+        file_name = os.path.basename(file_path)
+        # Remover extensão
+        name_without_ext = os.path.splitext(file_name)[0]
+
+        # Remover NUIT e código (padrão: - 0031629360_001 ou - 0031620659_000)
+        name_clean = re.sub(r'\s*-\s*\d+_\d+\s*$', '', name_without_ext)
+        name_clean = re.sub(r'\s*-\s*\d+\s+\d+\s*$', '', name_clean)
+
+        # Substituir underscores por espaços
+        name_clean = name_clean.replace('_', ' ')
+
+        # Remover espaços múltiplos
+        name_clean = ' '.join(name_clean.split())
+
+        return name_clean.strip()
+
     def _translate_single_file_realtime(
         self,
         file_path: str,
@@ -778,12 +966,59 @@ Preços por 1 milhão de tokens."""
             # Função de tradução que será chamada pela janela
             def translate_func(texts: List[str]) -> List[str]:
                 if use_ai and self.claude_client:
-                    # Traduzir com Claude
+                    # Traduzir com Claude (usa configuração otimizada automaticamente)
                     tokens_data = [{"location": f"T{i}", "text": text} for i, text in enumerate(texts)]
+
+                    # Extrair nome da empresa (se opção estiver ativada)
+                    company_name = ""
+                    if self.config.get("extract_company_from_filename", True):
+                        company_name = self._extract_company_name_from_filename(file_path)
+                        if company_name:
+                            print(f"🏢 Nome da empresa (do arquivo): '{company_name}'")
+
+                    # Se não extraiu do arquivo, usar configuração das preferências
+                    if not company_name or not company_name.strip():
+                        company_name = self.config.get("company_name", "")
+                        if company_name:
+                            print(f"🏢 Nome da empresa (das preferências): '{company_name}'")
+
+                    # LOG para debug
+                    if not company_name:
+                        print("⚠️ Nenhum nome de empresa para proteger")
+
                     translations, _ = self.claude_client.translate_document(
-                        tokens_data, source_lang, target_lang, dictionary
+                        tokens_data,
+                        source_lang,
+                        target_lang,
+                        dictionary,
+                        batch_size=None,  # Usa batch otimizado: 2000 segmentos para Haiku 3.5
+                        progress_callback=None,
+                        use_parallel=False,  # Sequencial com 1 worker (batches massivos)
+                        company_name=company_name  # Nome da empresa NUNCA traduzir
                     )
-                    return [t["translation"] for t in translations]
+
+                    # CRÍTICO: Mapear traduções pela location para garantir ordem correta
+                    # Claude pode dividir em batches e manter locations originais (T0, T14, T28, etc)
+                    translation_map = {t["location"]: t["translation"] for t in translations}
+
+                    # Garantir que TODAS as traduções estão presentes
+                    result = []
+                    missing_locations = []
+                    for i, text in enumerate(texts):
+                        location = f"T{i}"
+                        if location in translation_map:
+                            result.append(translation_map[location])
+                        else:
+                            # Tradução faltando - pode ser que batch foi cortado
+                            missing_locations.append(location)
+                            result.append(f"[ERRO: Tradução faltando para {location}]")
+
+                    if missing_locations:
+                        print(f"\n⚠️ AVISO: {len(missing_locations)} traduções faltando: {', '.join(missing_locations[:10])}")
+                        if len(missing_locations) > 10:
+                            print(f"   ... e mais {len(missing_locations) - 10} locations")
+
+                    return result
                 elif self.libre_client:
                     # Traduzir com LibreTranslate
                     return self.libre_client.translate_batch(texts, source_lang, target_lang)
@@ -816,7 +1051,12 @@ Preços por 1 milhão de tokens."""
                 tokens,
                 translate_func,
                 on_complete,
-                file_name
+                file_name,
+                history_manager=self.history_manager,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                output_dir=output_dir,
+                file_path=file_path
             )
 
         except Exception as e:
@@ -833,31 +1073,95 @@ Preços por 1 milhão de tokens."""
         output_dir: str
     ) -> None:
         """Traduz múltiplos arquivos com janela de batch"""
-        try:
-            # Extrair tokens de todos os arquivos
-            files_and_tokens: List[Tuple[str, List[Token]]] = []
-            for file_path in files:
-                try:
-                    tokens = extract_tokens(file_path)
-                    files_and_tokens.append((file_path, tokens))
-                except Exception as e:
-                    messagebox.showerror(
-                        "Erro",
-                        f"Erro ao extrair tokens de {os.path.basename(file_path)}:\n{e}"
-                    )
 
+        # Callback quando conversão de PDFs completa
+        def on_conversion_complete(files_and_tokens: List[Tuple[str, List[Token]]]):
             if not files_and_tokens:
+                messagebox.showwarning("Aviso", "Nenhum arquivo foi convertido com sucesso.")
                 return
+
+            # Continuar com tradução
+            self._start_batch_translation(
+                files_and_tokens, source_lang, target_lang, use_ai, dictionary, root_dir, output_dir
+            )
+
+        # Mostrar janela de conversão de PDFs
+        PDFConversionWindow(
+            self.root,
+            files,
+            extract_tokens,
+            on_conversion_complete
+        )
+
+    def _start_batch_translation(
+        self,
+        files_and_tokens: List[Tuple[str, List[Token]]],
+        source_lang: str,
+        target_lang: str,
+        use_ai: bool,
+        dictionary: Dict[str, str],
+        root_dir: str,
+        output_dir: str
+    ) -> None:
+        """Inicia tradução em batch após conversão de PDFs"""
+        try:
 
             # Função de tradução que será chamada pela janela
             def translate_func(file_path: str, texts: List[str]) -> List[str]:
                 if use_ai and self.claude_client:
-                    # Traduzir com Claude
+                    # Traduzir com Claude (usa configuração otimizada automaticamente)
                     tokens_data = [{"location": f"T{i}", "text": text} for i, text in enumerate(texts)]
+
+                    # Extrair nome da empresa (se opção estiver ativada)
+                    company_name = ""
+                    if self.config.get("extract_company_from_filename", True):
+                        company_name = self._extract_company_name_from_filename(file_path)
+                        if company_name:
+                            print(f"🏢 Nome da empresa (do arquivo): '{company_name}'")
+
+                    # Se não extraiu do arquivo, usar configuração das preferências
+                    if not company_name or not company_name.strip():
+                        company_name = self.config.get("company_name", "")
+                        if company_name:
+                            print(f"🏢 Nome da empresa (das preferências): '{company_name}'")
+
+                    # LOG para debug
+                    if not company_name:
+                        print("⚠️ Nenhum nome de empresa para proteger")
+
                     translations, _ = self.claude_client.translate_document(
-                        tokens_data, source_lang, target_lang, dictionary
+                        tokens_data,
+                        source_lang,
+                        target_lang,
+                        dictionary,
+                        batch_size=None,  # Usa batch otimizado: 2000 segmentos para Haiku 3.5
+                        progress_callback=None,
+                        use_parallel=False,  # Sequencial com 1 worker (batches massivos)
+                        company_name=company_name  # Nome da empresa NUNCA traduzir
                     )
-                    return [t["translation"] for t in translations]
+
+                    # CRÍTICO: Mapear traduções pela location para garantir ordem correta
+                    # Claude pode dividir em batches e manter locations originais (T0, T14, T28, etc)
+                    translation_map = {t["location"]: t["translation"] for t in translations}
+
+                    # Garantir que TODAS as traduções estão presentes
+                    result = []
+                    missing_locations = []
+                    for i, text in enumerate(texts):
+                        location = f"T{i}"
+                        if location in translation_map:
+                            result.append(translation_map[location])
+                        else:
+                            # Tradução faltando - pode ser que batch foi cortado
+                            missing_locations.append(location)
+                            result.append(f"[ERRO: Tradução faltando para {location}]")
+
+                    if missing_locations:
+                        print(f"\n⚠️ AVISO: {len(missing_locations)} traduções faltando: {', '.join(missing_locations[:10])}")
+                        if len(missing_locations) > 10:
+                            print(f"   ... e mais {len(missing_locations) - 10} locations")
+
+                    return result
                 elif self.libre_client:
                     # Traduzir com LibreTranslate
                     return self.libre_client.translate_batch(texts, source_lang, target_lang)
@@ -907,7 +1211,11 @@ Preços por 1 milhão de tokens."""
                 files_and_tokens,
                 translate_func,
                 on_complete,
-                auto_save=self.auto_save_var.get()
+                auto_save=self.auto_save_var.get(),
+                history_manager=self.history_manager,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                output_dir=output_dir
             )
 
         except Exception as e:
@@ -1060,9 +1368,32 @@ Preços por 1 milhão de tokens."""
                                             d
                                         ))
 
+                                    # Extrair nome da empresa (se opção estiver ativada)
+                                    company_name = ""
+                                    if self.config.get("extract_company_from_filename", True):
+                                        company_name = self._extract_company_name_from_filename(file_path)
+                                        if company_name:
+                                            print(f"🏢 Nome da empresa (do arquivo): '{company_name}'")
+
+                                    # Se não extraiu do arquivo, usar configuração das preferências
+                                    if not company_name or not company_name.strip():
+                                        company_name = self.config.get("company_name", "")
+                                        if company_name:
+                                            print(f"🏢 Nome da empresa (das preferências): '{company_name}'")
+
+                                    # LOG para debug
+                                    if not company_name:
+                                        print("⚠️ Nenhum nome de empresa para proteger")
+
                                     translations, usage_stats = self.claude_client.translate_document(
-                                        tokens_data, source_lang, target_lang, dictionary,
-                                        progress_callback=on_translation_progress
+                                        tokens_data,
+                                        source_lang,
+                                        target_lang,
+                                        dictionary,
+                                        batch_size=None,  # Usa batch otimizado: 2000 segmentos para Haiku 3.5
+                                        progress_callback=on_translation_progress,
+                                        use_parallel=False,  # Sequencial com 1 worker (batches massivos)
+                                        company_name=company_name  # Nome da empresa NUNCA traduzir
                                     )
                                     self.cache.set(
                                         cache_key, source_lang, target_lang, json.dumps(translations)
@@ -1239,6 +1570,8 @@ Preços por 1 milhão de tokens."""
         self.config.set("mysql_database", self.mysql_db_var.get())
         self.config.set("mysql_user", self.mysql_user_var.get())
         self.config.set("mysql_password", self.mysql_pass_var.get())
+        self.config.set("company_name", self.company_name_var.get().strip())
+        self.config.set("extract_company_from_filename", self.extract_company_from_filename_var.get())
 
         # Reinicializar clientes
         self._init_clients()
@@ -1437,3 +1770,307 @@ Preços por 1 milhão de tokens."""
         # SEMPRE exportar como .docx
         out_rel = f"{base}_traduzido.docx"
         return os.path.join(output_dir, out_rel)
+
+    # ========== Métodos de Histórico ==========
+
+    def refresh_history(self) -> None:
+        """Atualiza lista de histórico"""
+        try:
+            # Obter filtro
+            filter_value = self.history_filter_var.get()
+
+            # Carregar traduções
+            if filter_value == "Em Andamento":
+                translations = self.history_manager.get_in_progress_translations()
+            elif filter_value == "Concluídas":
+                translations = self.history_manager.get_completed_translations()
+            elif filter_value == "Falhadas":
+                all_trans = self.history_manager.get_all_translations()
+                translations = [t for t in all_trans if t.get("status") == "failed"]
+            else:
+                translations = self.history_manager.get_all_translations()
+
+            # Atualizar estatísticas
+            stats = self.history_manager.get_statistics()
+            stats_text = (
+                f"Total: {stats['total']} traduções | "
+                f"Em Andamento: {stats['in_progress']} | "
+                f"Concluídas: {stats['completed']} | "
+                f"Falhadas: {stats['failed']}\n"
+                f"Total de Arquivos Traduzidos: {stats['total_files_completed']:,} | "
+                f"Total de Tokens: {stats['total_tokens_translated']:,}"
+            )
+            self.stats_label.config(text=stats_text)
+
+            # Limpar e popular tabela
+            self.history_tree.delete(*self.history_tree.get_children())
+
+            for trans in translations:
+                # Formatar timestamp
+                timestamp = trans.get("timestamp", "")
+                if timestamp:
+                    try:
+                        dt = datetime.fromisoformat(timestamp)
+                        timestamp_str = dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        timestamp_str = timestamp[:16]
+                else:
+                    timestamp_str = "N/A"
+
+                # Status com emoji
+                status = trans.get("status", "unknown")
+                status_icons = {
+                    "in_progress": "🔄 Em Andamento",
+                    "completed": "✅ Concluída",
+                    "failed": "❌ Falhada"
+                }
+                status_str = status_icons.get(status, status)
+
+                # Idiomas
+                langs = f"{trans.get('source_lang', '?')} → {trans.get('target_lang', '?')}"
+
+                # Arquivos
+                total_files = trans.get("total_files", 0)
+
+                # Progresso
+                total_tokens = trans.get("total_tokens", 0)
+                translated_tokens = trans.get("translated_tokens", 0)
+                if total_tokens > 0:
+                    percent = int((translated_tokens / total_tokens) * 100)
+                    progress_str = f"{translated_tokens}/{total_tokens} ({percent}%)"
+                else:
+                    progress_str = "N/A"
+
+                # Output
+                output_dir = trans.get("output_dir", "N/A")
+
+                # Inserir na árvore com ID da tradução
+                self.history_tree.insert(
+                    "",
+                    tk.END,
+                    iid=trans.get("id"),
+                    values=(timestamp_str, status_str, langs, total_files, progress_str, output_dir)
+                )
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao carregar histórico:\n{e}")
+
+    def resume_translation(self) -> None:
+        """Retoma tradução selecionada"""
+        selection = self.history_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma tradução para retomar.")
+            return
+
+        translation_id = selection[0]
+        translation = self.history_manager.get_translation(translation_id)
+
+        if not translation:
+            messagebox.showerror("Erro", "Tradução não encontrada.")
+            return
+
+        if translation.get("status") != "in_progress":
+            result = messagebox.askyesno(
+                "Tradução já finalizada",
+                "Esta tradução já foi finalizada. Deseja reprocessá-la?"
+            )
+            if not result:
+                return
+
+        try:
+            # Extrair dados da tradução
+            files_data = translation.get("files", [])
+            source_lang = translation.get("source_lang")
+            target_lang = translation.get("target_lang")
+            output_dir = translation.get("output_dir")
+
+            # Reconstruir lista de arquivos
+            files = [f.get("path") for f in files_data if f.get("path")]
+
+            if not files:
+                messagebox.showerror("Erro", "Nenhum arquivo encontrado nesta tradução.")
+                return
+
+            # Configurar variáveis de tradução
+            self.source_var.set(source_lang)
+            self.target_var.set(target_lang)
+            self.output_dir_var.set(output_dir)
+
+            # Iniciar tradução
+            messagebox.showinfo(
+                "Retomando Tradução",
+                f"Retomando tradução de {len(files)} arquivo(s).\n"
+                f"Idiomas: {source_lang} → {target_lang}"
+            )
+
+            self._translate_files(files)
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao retomar tradução:\n{e}")
+
+    def download_translation_files(self) -> None:
+        """Baixa arquivos de tradução concluída"""
+        selection = self.history_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma tradução para baixar.")
+            return
+
+        translation_id = selection[0]
+        translation = self.history_manager.get_translation(translation_id)
+
+        if not translation:
+            messagebox.showerror("Erro", "Tradução não encontrada.")
+            return
+
+        if translation.get("status") != "completed":
+            messagebox.showwarning(
+                "Aviso",
+                "Esta tradução ainda não foi concluída."
+            )
+            return
+
+        try:
+            # Obter arquivos de saída
+            output_files = self.history_manager.export_completed_files(translation_id)
+
+            if not output_files:
+                messagebox.showwarning(
+                    "Aviso",
+                    "Nenhum arquivo de saída encontrado.\n"
+                    "Os arquivos podem ter sido movidos ou deletados."
+                )
+                return
+
+            # Perguntar onde salvar
+            save_dir = filedialog.askdirectory(
+                title="Selecione pasta para salvar arquivos traduzidos"
+            )
+
+            if not save_dir:
+                return
+
+            # Copiar arquivos
+            import shutil
+            copied = 0
+
+            for file_path in output_files:
+                if os.path.exists(file_path):
+                    dest_path = os.path.join(save_dir, os.path.basename(file_path))
+                    shutil.copy2(file_path, dest_path)
+                    copied += 1
+
+            messagebox.showinfo(
+                "Sucesso",
+                f"✅ {copied} arquivo(s) copiado(s) para:\n{save_dir}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao baixar arquivos:\n{e}")
+
+    def delete_selected_history(self) -> None:
+        """Remove tradução selecionada do histórico"""
+        selection = self.history_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aviso", "Selecione uma tradução para remover.")
+            return
+
+        result = messagebox.askyesno(
+            "Confirmar Remoção",
+            "Tem certeza que deseja remover esta tradução do histórico?\n\n"
+            "ATENÇÃO: Isso NÃO deletará os arquivos traduzidos."
+        )
+
+        if not result:
+            return
+
+        translation_id = selection[0]
+        if self.history_manager.delete_translation(translation_id):
+            messagebox.showinfo("Sucesso", "Tradução removida do histórico.")
+            self.refresh_history()
+        else:
+            messagebox.showerror("Erro", "Não foi possível remover a tradução.")
+
+    def clear_completed_history(self) -> None:
+        """Limpa traduções concluídas do histórico"""
+        result = messagebox.askyesno(
+            "Confirmar Limpeza",
+            "Tem certeza que deseja remover TODAS as traduções concluídas do histórico?\n\n"
+            "ATENÇÃO: Isso NÃO deletará os arquivos traduzidos."
+        )
+
+        if not result:
+            return
+
+        self.history_manager.clear_completed_translations()
+        messagebox.showinfo("Sucesso", "Traduções concluídas removidas do histórico.")
+        self.refresh_history()
+
+    def export_history_report(self) -> None:
+        """Exporta relatório de histórico"""
+        try:
+            import csv
+
+            # Selecionar local para salvar
+            file_path = filedialog.asksaveasfilename(
+                title="Exportar Relatório",
+                defaultextension=".csv",
+                filetypes=(("CSV", "*.csv"), ("Todos", "*.*"))
+            )
+
+            if not file_path:
+                return
+
+            # Obter todas as traduções
+            translations = self.history_manager.get_all_translations()
+
+            # Escrever CSV
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+
+                # Cabeçalho
+                writer.writerow([
+                    "Data/Hora",
+                    "Status",
+                    "Idioma Origem",
+                    "Idioma Destino",
+                    "Total Arquivos",
+                    "Total Tokens",
+                    "Tokens Traduzidos",
+                    "Progresso (%)",
+                    "Pasta Saída",
+                    "Erro"
+                ])
+
+                # Dados
+                for trans in translations:
+                    timestamp = trans.get("timestamp", "")
+                    if timestamp:
+                        try:
+                            dt = datetime.fromisoformat(timestamp)
+                            timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        except:
+                            timestamp_str = timestamp
+                    else:
+                        timestamp_str = "N/A"
+
+                    total_tokens = trans.get("total_tokens", 0)
+                    translated_tokens = trans.get("translated_tokens", 0)
+                    progress = int((translated_tokens / total_tokens) * 100) if total_tokens > 0 else 0
+
+                    writer.writerow([
+                        timestamp_str,
+                        trans.get("status", ""),
+                        trans.get("source_lang", ""),
+                        trans.get("target_lang", ""),
+                        trans.get("total_files", 0),
+                        total_tokens,
+                        translated_tokens,
+                        progress,
+                        trans.get("output_dir", ""),
+                        trans.get("error_message", "")
+                    ])
+
+            messagebox.showinfo("Sucesso", f"Relatório exportado para:\n{file_path}")
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao exportar relatório:\n{e}")

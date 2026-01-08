@@ -100,9 +100,12 @@ class SettingsWindow:
 
         self.model_var = tk.StringVar(value=self.config.get("claude_model", "claude-3-5-sonnet-20241022"))
         model_combo = ttk.Combobox(container, textvariable=self.model_var, width=40, state="readonly", values=[
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-5-20251101",
+            "claude-haiku-4-5-20251001",
             "claude-3-5-sonnet-20241022",
             "claude-3-opus-20240229",
-            "claude-3-haiku-20240307"
+            "claude-3-5-haiku-20241022"
         ])
         model_combo.grid(row=3, column=0, sticky="w", pady=(0, 15))
 
@@ -125,15 +128,15 @@ class SettingsWindow:
         price_frame.grid(row=6, column=0, columnspan=3, sticky="ew")
 
         prices_text = """
-Claude 3.5 Sonnet (Recomendado):
+Claude 4.5 Sonnet (Recomendado):
   • Input: $3.00    • Output: $15.00
   • Cache Write: $3.75    • Cache Read: $0.30
 
-Claude 3 Opus (Mais Poderoso):
+Claude 4.5 Opus (Mais Poderoso):
   • Input: $15.00    • Output: $75.00
   • Cache Write: $18.75    • Cache Read: $1.50
 
-Claude 3 Haiku (Mais Rápido/Barato):
+Claude 4.5 Haiku (Mais Rápido/Barato):
   • Input: $0.25    • Output: $1.25
   • Cache Write: $0.30    • Cache Read: $0.03
         """

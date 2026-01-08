@@ -1,0 +1,32 @@
+# Erros JSON do Claude (para análise local)
+claude_json_errors/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+
+# Build
+build/
+dist/
+*.spec
+
+# Config local
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+translation_progress.json
+translation_history.json
