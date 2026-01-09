@@ -20,6 +20,7 @@ try:
     from .config_manager import ConfigManager
     from .libretranslate_client import LibreTranslateClient
     from .claude_client import ClaudeClient
+    from .openai_client import OpenAIClient
     from .database import Database
     from .translation_cache import TranslationCache
     from .progress_window import ProgressWindow
@@ -36,6 +37,7 @@ except ImportError:
     from config_manager import ConfigManager
     from libretranslate_client import LibreTranslateClient
     from claude_client import ClaudeClient
+    from openai_client import OpenAIClient
     from database import Database
     from translation_cache import TranslationCache
     from progress_window import ProgressWindow
@@ -67,6 +69,7 @@ class TranslatorUI:
         self.config = ConfigManager()
         self.libre_client: Optional[LibreTranslateClient] = None
         self.claude_client: Optional[ClaudeClient] = None
+        self.openai_client: Optional[OpenAIClient] = None
         self.db: Optional[Database] = None
         self.cache = TranslationCache()
         self.history_manager = HistoryManager()
@@ -78,6 +81,7 @@ class TranslatorUI:
         self.output_dir_var = tk.StringVar()
         self.skip_existing_var = tk.BooleanVar(value=True)
         self.use_ai_var = tk.BooleanVar(value=self.config.get("use_ai", False))
+        self.ai_provider_var = tk.StringVar(value=self.config.get("ai_provider", "claude"))
         self.use_dictionary_var = tk.BooleanVar(value=self.config.get("use_dictionary", True))
         self.status_var = tk.StringVar(value="Pronto")
         self.eta_var = tk.StringVar(value="")
@@ -95,6 +99,8 @@ class TranslatorUI:
 
     def _init_clients(self) -> None:
         """Inicializa clientes LibreTranslate, Claude e Database"""
+        self.claude_client = None
+        self.openai_client = None
         try:
             # LibreTranslate
             libre_url = self.config.get("libretranslate_url", "http://102.211.186.44:5000")
@@ -126,6 +132,22 @@ class TranslatorUI:
                 self.claude_client = ClaudeClient(api_key=claude_api_key, model=claude_model)
         except Exception as e:
             print(f"⚠ Erro ao inicializar Claude: {e}")
+
+        try:
+            # OpenAI (sÇü se tiver API key)
+            openai_api_key = self.config.get("openai_api_key", "")
+            if openai_api_key:
+                openai_model = self.config.get("openai_model", "gpt-4o-mini")
+                openai_base_url = self.config.get("openai_base_url", "https://api.openai.com/v1")
+                openai_timeout = self.config.get("openai_timeout", 60.0)
+                self.openai_client = OpenAIClient(
+                    api_key=openai_api_key,
+                    model=openai_model,
+                    base_url=openai_base_url,
+                    timeout=openai_timeout,
+                )
+        except Exception as e:
+            print(f"ƒsÿ Erro ao inicializar OpenAI: {e}")
 
         try:
             # Database
@@ -177,6 +199,7 @@ class TranslatorUI:
 
         # Aba 2: Configurações Claude
         self._create_claude_settings_tab()
+        self._create_openai_settings_tab()
 
         # Aba 3: Monitoramento
         self._create_monitoring_tab()
@@ -219,11 +242,22 @@ class TranslatorUI:
         )
         target_combo.grid(row=0, column=3, sticky=tk.W, padx=5, pady=5)
 
-        ttk.Checkbutton(lang_frame, text="Usar Claude IA", variable=self.use_ai_var).grid(
+        ttk.Checkbutton(lang_frame, text="Usar IA", variable=self.use_ai_var).grid(
             row=0, column=4, sticky=tk.W, padx=(30, 5), pady=5
         )
+        ttk.Label(lang_frame, text="Provider:").grid(
+            row=0, column=5, sticky=tk.W, padx=(10, 5), pady=5
+        )
+        provider_combo = ttk.Combobox(
+            lang_frame,
+            textvariable=self.ai_provider_var,
+            values=["claude", "openai"],
+            width=12,
+            state="readonly",
+        )
+        provider_combo.grid(row=0, column=6, sticky=tk.W, padx=(0, 5), pady=5)
         ttk.Checkbutton(lang_frame, text="Usar Dicionário", variable=self.use_dictionary_var).grid(
-            row=0, column=5, sticky=tk.W, padx=5, pady=5
+            row=1, column=2, sticky=tk.W, padx=5, pady=5
         )
         
         # Checkbox de auto-save
@@ -395,6 +429,83 @@ Preços por 1 milhão de tokens."""
         save_frame.pack(fill=tk.X, padx=20)
 
         ttk.Button(save_frame, text="Salvar Configurações", command=self.save_claude_settings).pack(
+            side=tk.RIGHT, padx=5
+        )
+
+    def _create_openai_settings_tab(self) -> None:
+        """Aba de configurações da OpenAI"""
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="OpenAI API")
+
+        info_frame = ttk.LabelFrame(tab, text="Configuração da API OpenAI", padding=15)
+        info_frame.pack(fill=tk.X, padx=20, pady=20)
+
+        info_text = (
+            "Para usar OpenAI:\n"
+            "1. Acesse platform.openai.com e crie uma conta\n"
+            "2. Gere uma API key\n"
+            "3. Cole a API key abaixo e teste a conexão"
+        )
+        ttk.Label(info_frame, text=info_text, justify=tk.LEFT).pack(anchor=tk.W)
+
+        api_frame = ttk.LabelFrame(tab, text="API Key", padding=15)
+        api_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+
+        ttk.Label(api_frame, text="API Key:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.openai_api_key_var = tk.StringVar(value=self.config.get("openai_api_key", ""))
+        self.openai_api_key_entry = ttk.Entry(api_frame, textvariable=self.openai_api_key_var, width=70, show="*")
+        self.openai_api_key_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        self.openai_show_key_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            api_frame,
+            text="Mostrar",
+            variable=self.openai_show_key_var,
+            command=lambda: self.openai_api_key_entry.config(
+                show="" if self.openai_show_key_var.get() else "*"
+            ),
+        ).grid(row=0, column=2, padx=5)
+
+        ttk.Label(api_frame, text="Modelo:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.openai_model_var = tk.StringVar(value=self.config.get("openai_model", "gpt-4o-mini"))
+        model_combo = ttk.Combobox(
+            api_frame,
+            textvariable=self.openai_model_var,
+            values=["gpt-4o-mini", "gpt-4o"],
+            width=40,
+            state="readonly",
+        )
+        model_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Label(api_frame, text="Base URL:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.openai_base_url_var = tk.StringVar(
+            value=self.config.get("openai_base_url", "https://api.openai.com/v1")
+        )
+        ttk.Entry(api_frame, textvariable=self.openai_base_url_var, width=50).grid(
+            row=2, column=1, sticky=tk.W, padx=5, pady=5
+        )
+
+        ttk.Label(api_frame, text="Timeout (s):").grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
+        self.openai_timeout_var = tk.DoubleVar(value=self.config.get("openai_timeout", 60.0))
+        ttk.Spinbox(
+            api_frame,
+            from_=5.0,
+            to=120.0,
+            textvariable=self.openai_timeout_var,
+            width=10,
+        ).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Button(api_frame, text="Testar Conexão", command=self.test_openai_connection).grid(
+            row=4, column=1, sticky=tk.W, padx=5, pady=10
+        )
+
+        self.openai_status_label = ttk.Label(api_frame, text="")
+        self.openai_status_label.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+
+        save_frame = ttk.Frame(tab, padding=10)
+        save_frame.pack(fill=tk.X, padx=20)
+
+        ttk.Button(save_frame, text="Salvar Configurações", command=self.save_openai_settings).pack(
             side=tk.RIGHT, padx=5
         )
 
@@ -874,6 +985,24 @@ Preços por 1 milhão de tokens."""
 
         self._translate_files(self.folder_files)
 
+    def _get_ai_context(self) -> Tuple[Optional[Any], str, str]:
+        """Retorna (cliente, provider, modelo) conforme seleção atual."""
+        provider = self.ai_provider_var.get()
+        if provider == "openai":
+            model = (
+                self.openai_model_var.get()
+                if hasattr(self, "openai_model_var")
+                else self.config.get("openai_model", "gpt-4o-mini")
+            )
+            return self.openai_client, "openai", model
+
+        model = (
+            self.model_var.get()
+            if hasattr(self, "model_var")
+            else self.config.get("claude_model", "claude-3-5-sonnet-20241022")
+        )
+        return self.claude_client, "claude", model
+
     def _translate_files(self, files: List[str]) -> None:
         """
         Traduz lista de arquivos usando janelas apropriadas:
@@ -892,11 +1021,15 @@ Preços por 1 milhão de tokens."""
         use_ai = self.use_ai_var.get()
         use_dict = self.use_dictionary_var.get()
 
-        # Verificar se Claude está disponível
-        if use_ai and not self.claude_client:
+        ai_client, ai_provider, _ = self._get_ai_context()
+        self.config.set("ai_provider", self.ai_provider_var.get())
+
+        # Verificar se provider está disponível
+        if use_ai and not ai_client:
+            provider_name = "OpenAI" if ai_provider == "openai" else "Claude"
             result = messagebox.askyesno(
-                "Claude não configurado",
-                "API key do Claude não está configurada.\n\n"
+                f"{provider_name} não configurado",
+                f"API key do {provider_name} não está configurada.\n\n"
                 "Deseja traduzir apenas com LibreTranslate?",
             )
             if not result:
@@ -912,12 +1045,12 @@ Preços por 1 milhão de tokens."""
         if len(files) == 1:
             # Arquivo único - usar RealTimeTranslationWindow
             self._translate_single_file_realtime(
-                files[0], source_lang, target_lang, use_ai, dictionary, output_dir
+                files[0], source_lang, target_lang, use_ai, dictionary, output_dir, ai_client, ai_provider
             )
         else:
             # Múltiplos arquivos - usar BatchTranslationWindow
             self._translate_multiple_files_batch(
-                files, source_lang, target_lang, use_ai, dictionary, root_dir, output_dir
+                files, source_lang, target_lang, use_ai, dictionary, root_dir, output_dir, ai_client, ai_provider
             )
 
     def _extract_company_name_from_filename(self, file_path: str) -> str:
@@ -955,7 +1088,9 @@ Preços por 1 milhão de tokens."""
         target_lang: str,
         use_ai: bool,
         dictionary: Dict[str, str],
-        output_dir: str
+        output_dir: str,
+        ai_client: Optional[Any],
+        ai_provider: str
     ) -> None:
         """Traduz arquivo único com janela de tempo real"""
         try:
@@ -965,7 +1100,7 @@ Preços por 1 milhão de tokens."""
 
             # Função de tradução que será chamada pela janela
             def translate_func(texts: List[str]) -> List[str]:
-                if use_ai and self.claude_client:
+                if use_ai and ai_client:
                     # Traduzir com Claude (usa configuração otimizada automaticamente)
                     tokens_data = [{"location": f"T{i}", "text": text} for i, text in enumerate(texts)]
 
@@ -986,14 +1121,23 @@ Preços por 1 milhão de tokens."""
                     if not company_name:
                         print("⚠️ Nenhum nome de empresa para proteger")
 
-                    translations, _ = self.claude_client.translate_document(
+                    def on_progress(msg: str, percent: float):
+                        self.root.after(
+                            0,
+                            lambda: self.status_var.set(
+                                f"{ai_provider.upper()}: {percent:.0f}% - {msg}"
+                            ),
+                        )
+
+                    ai_dictionary = {} if ai_provider != "openai" else None
+                    translations, _ = ai_client.translate_document(
                         tokens_data,
                         source_lang,
                         target_lang,
-                        dictionary,
+                        ai_dictionary,
                         batch_size=None,  # Usa batch otimizado: 2000 segmentos para Haiku 3.5
-                        progress_callback=None,
-                        use_parallel=False,  # Sequencial com 1 worker (batches massivos)
+                        progress_callback=on_progress,
+                        use_parallel=(ai_provider == "openai"),
                         company_name=company_name  # Nome da empresa NUNCA traduzir
                     )
 
@@ -1070,7 +1214,9 @@ Preços por 1 milhão de tokens."""
         use_ai: bool,
         dictionary: Dict[str, str],
         root_dir: str,
-        output_dir: str
+        output_dir: str,
+        ai_client: Optional[Any],
+        ai_provider: str
     ) -> None:
         """Traduz múltiplos arquivos com janela de batch"""
 
@@ -1082,7 +1228,15 @@ Preços por 1 milhão de tokens."""
 
             # Continuar com tradução
             self._start_batch_translation(
-                files_and_tokens, source_lang, target_lang, use_ai, dictionary, root_dir, output_dir
+                files_and_tokens,
+                source_lang,
+                target_lang,
+                use_ai,
+                dictionary,
+                root_dir,
+                output_dir,
+                ai_client,
+                ai_provider,
             )
 
         # Mostrar janela de conversão de PDFs
@@ -1101,14 +1255,16 @@ Preços por 1 milhão de tokens."""
         use_ai: bool,
         dictionary: Dict[str, str],
         root_dir: str,
-        output_dir: str
+        output_dir: str,
+        ai_client: Optional[Any],
+        ai_provider: str
     ) -> None:
         """Inicia tradução em batch após conversão de PDFs"""
         try:
 
             # Função de tradução que será chamada pela janela
             def translate_func(file_path: str, texts: List[str]) -> List[str]:
-                if use_ai and self.claude_client:
+                if use_ai and ai_client:
                     # Traduzir com Claude (usa configuração otimizada automaticamente)
                     tokens_data = [{"location": f"T{i}", "text": text} for i, text in enumerate(texts)]
 
@@ -1129,14 +1285,23 @@ Preços por 1 milhão de tokens."""
                     if not company_name:
                         print("⚠️ Nenhum nome de empresa para proteger")
 
-                    translations, _ = self.claude_client.translate_document(
+                    def on_progress(msg: str, percent: float):
+                        self.root.after(
+                            0,
+                            lambda: self.status_var.set(
+                                f"{ai_provider.upper()}: {percent:.0f}% - {msg}"
+                            ),
+                        )
+
+                    ai_dictionary = {} if ai_provider != "openai" else None
+                    translations, _ = ai_client.translate_document(
                         tokens_data,
                         source_lang,
                         target_lang,
-                        dictionary,
+                        ai_dictionary,
                         batch_size=None,  # Usa batch otimizado: 2000 segmentos para Haiku 3.5
-                        progress_callback=None,
-                        use_parallel=False,  # Sequencial com 1 worker (batches massivos)
+                        progress_callback=on_progress,
+                        use_parallel=(ai_provider == "openai"),
                         company_name=company_name  # Nome da empresa NUNCA traduzir
                     )
 
@@ -1252,11 +1417,12 @@ Preços por 1 milhão de tokens."""
         use_ai = self.use_ai_var.get()
         use_dict = self.use_dictionary_var.get()
 
-        # Verificar Claude se necessário
-        if use_ai and not self.claude_client:
+        # Verificar provider se necessário
+        if use_ai and not ai_client:
+            provider_name = "OpenAI" if ai_provider == "openai" else "Claude"
             result = messagebox.askyesno(
-                "Claude não configurado",
-                "API key do Claude não está configurada.\n\n"
+                f"{provider_name} não configurado",
+                f"API key do {provider_name} não está configurada.\n\n"
                 "Deseja traduzir apenas com LibreTranslate?",
             )
             if not result:
@@ -1343,7 +1509,7 @@ Preços por 1 milhão de tokens."""
                             f"{rel_name} - {len(tokens)} textos para traduzir"
                         ))
 
-                        if use_ai and self.claude_client:
+                        if use_ai and ai_client:
                             # Usar Claude
                             tokens_data = [
                                 {"location": t.location, "text": t.text}
@@ -1352,7 +1518,7 @@ Preços por 1 milhão de tokens."""
                             ]
 
                             if tokens_data:
-                                cache_key = f"{file_path}|{source_lang}|{target_lang}"
+                                cache_key = f"{file_path}|{source_lang}|{target_lang}|{ai_provider}|{ai_model}"
                                 cached = self.cache.get(cache_key, source_lang, target_lang)
 
                                 if cached:
@@ -1362,6 +1528,7 @@ Preços por 1 milhão de tokens."""
                                     # Callback de progresso para tradução Claude
                                     def on_translation_progress(msg: str, percent: float):
                                         details = f"Arquivo {idx}/{total_files}: {rel_name} - {msg}"
+                                        print(f"{ai_provider.upper()}: {percent:.0f}% - {msg}")
                                         self.root.after(0, lambda d=details: progress_window.update(
                                             base_progress + (file_step_weight * 0.6),
                                             f"Traduzindo arquivo {idx}/{total_files}...",
@@ -1385,14 +1552,15 @@ Preços por 1 milhão de tokens."""
                                     if not company_name:
                                         print("⚠️ Nenhum nome de empresa para proteger")
 
-                                    translations, usage_stats = self.claude_client.translate_document(
+                                    ai_dictionary = {} if ai_provider != "openai" else None
+                                    translations, usage_stats = ai_client.translate_document(
                                         tokens_data,
                                         source_lang,
                                         target_lang,
-                                        dictionary,
+                                        ai_dictionary,
                                         batch_size=None,  # Usa batch otimizado: 2000 segmentos para Haiku 3.5
                                         progress_callback=on_translation_progress,
-                                        use_parallel=False,  # Sequencial com 1 worker (batches massivos)
+                                        use_parallel=(ai_provider == "openai"),
                                         company_name=company_name  # Nome da empresa NUNCA traduzir
                                     )
                                     self.cache.set(
@@ -1407,8 +1575,8 @@ Preços por 1 milhão de tokens."""
                                             cache_creation_tokens=usage_stats.get("cache_creation_tokens", 0),
                                             cache_read_tokens=usage_stats.get("cache_read_tokens", 0),
                                             cost=usage_stats.get("cost", 0),
-                                            model=self.model_var.get(),
-                                            provider="claude",
+                                            model=ai_model,
+                                            provider=ai_provider,
                                         )
 
                                 trans_map = {t["location"]: t["translation"] for t in translations}
@@ -1543,6 +1711,43 @@ Preços por 1 milhão de tokens."""
         self._init_clients()
 
         messagebox.showinfo("Sucesso", "Configurações do Claude salvas!")
+
+    def test_openai_connection(self) -> None:
+        """Testa conexão com OpenAI"""
+        api_key = self.openai_api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("Aviso", "Insira a API key primeiro.")
+            return
+
+        try:
+            client = OpenAIClient(
+                api_key=api_key,
+                model=self.openai_model_var.get(),
+                base_url=self.openai_base_url_var.get().strip(),
+                timeout=self.openai_timeout_var.get(),
+            )
+
+            if client.test_connection():
+                self.openai_status_label.config(text="✓ Conexão bem-sucedida!", foreground="green")
+                messagebox.showinfo("Sucesso", "API Key válida e funcionando!")
+            else:
+                raise Exception("Falha ao obter resposta da OpenAI.")
+
+        except Exception as e:
+            self.openai_status_label.config(text=f"✗ Erro: {str(e)[:50]}", foreground="red")
+            messagebox.showerror("Erro", f"Falha ao conectar:\n{e}")
+
+    def save_openai_settings(self) -> None:
+        """Salva configurações da OpenAI"""
+        self.config.set("openai_api_key", self.openai_api_key_var.get().strip())
+        self.config.set("openai_model", self.openai_model_var.get())
+        self.config.set("openai_base_url", self.openai_base_url_var.get().strip())
+        self.config.set("openai_timeout", self.openai_timeout_var.get())
+
+        # Reinicializar cliente
+        self._init_clients()
+
+        messagebox.showinfo("Sucesso", "Configurações da OpenAI salvas!")
 
     def test_mysql_connection(self) -> None:
         """Testa conexão com MySQL"""

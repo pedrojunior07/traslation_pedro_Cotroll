@@ -57,6 +57,12 @@ class ConfigManager:
             "claude_api_key": "",
             "claude_model": "claude-sonnet-4-5-20250929",
 
+            # OpenAI
+            "openai_api_key": "",
+            "openai_model": "gpt-4o-mini",
+            "openai_base_url": "https://api.openai.com/v1",
+            "openai_timeout": 60.0,
+
             # LibreTranslate
             "libretranslate_url": "http://102.211.186.44/translate",
             "libretranslate_timeout": 15.0,
@@ -74,6 +80,7 @@ class ConfigManager:
             # Preferências de tradução
             "use_dictionary": True,
             "use_ai": True,
+            "ai_provider": "claude",
             "auto_glossary": False,
             "default_source_lang": "en",
             "default_target_lang": "pt",

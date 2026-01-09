@@ -561,151 +561,15 @@ TRANSLATION RULES:
                     response_text = cleaned
                     print(f"  🧹 Texto extra removido (antes/depois do JSON)")
 
-            # Parse JSON da resposta
-            try:
-                # Remover markdown code blocks se existirem
-                if response_text.startswith("```"):
-                    lines = response_text.split("\n")
-                    response_text = "\n".join(lines[1:-1])  # Remove primeira e última linha
-
-                result = json.loads(response_text)
-                translations = result.get("translations", [])
-
-                # VALIDAÇÃO: Remover traduções vazias
-                original_count = len(translations)
-                translations = [t for t in translations if t.get("translation", "").strip()]
-                removed = original_count - len(translations)
-                if removed > 0:
-                    print(f"⚠️ {removed} traduções vazias removidas automaticamente")
-            except json.JSONDecodeError as e:
-                # AUTO-CORREÇÃO: Tentar consertar erros comuns de JSON
-                print(f" Erro JSON detectado, tentando auto-correção...")
-
-                fixed = response_text
-                corrections_made = []
-
-                try:
-                    # 1. Corrigir aspas triplas escapadas erradas: \""" → \"
-                    import re
-                    if r'\"""' in fixed:
-                        fixed = fixed.replace(r'\"""', r'\"')
-                        corrections_made.append("aspas triplas → aspas simples")
-
-                    # 2. Corrigir aspas duplas escapadas duplicadas: \\"" → \"
-                    if r'\\"' in fixed:
-                        fixed = re.sub(r'\\"', r'\"', fixed)
-                        corrections_made.append("aspas duplas escapadas duplicadas")
-
-                    # 3. Corrigir aspas simples ao invés de duplas (caso comum)
-                    if "'" in fixed and '"' not in fixed:
-                        fixed = fixed.replace("'", '"')
-                        corrections_made.append("aspas simples → duplas")
-
-                    # 4. Corrigir vírgulas faltantes entre objetos JSON
-                    # Padrão: }NEWLINE    { → },NEWLINE    {
-                    virgula_faltante = re.compile(r'\}\s*\n\s*\{')
-                    if virgula_faltante.search(fixed):
-                        fixed = virgula_faltante.sub(r'},\n    {', fixed)
-                        corrections_made.append("vírgulas faltantes entre objetos")
-
-                    # 5. Corrigir ponto e vírgula antes de chave de fechamento
-                    # Padrão: ";} → "}
-                    if '";}'in fixed or "';}" in fixed:
-                        fixed = fixed.replace('";}"', '"}').replace("';}'", "}")
-                        corrections_made.append("ponto e vírgula antes de }")
-
-                    # 6. Remover caracteres de controle inválidos (tabs, newlines dentro de strings)
-                    # Substituir tabs e newlines não escapados por espaços
-                    fixed = re.sub(r'(?<!\\)\t', ' ', fixed)  # Tab → espaço
-                    fixed = re.sub(r'(?<!\\)\r', '', fixed)   # Carriage return → remover
-                    # Newlines dentro de valores JSON (não entre objetos) → \n
-                    fixed = re.sub(r':\s*"([^"]*)\n([^"]*)"', r': "\1\\n\2"', fixed)
-
-                    # 7. Corrigir caracteres extras após aspas de fechamento
-                    # Padrão: "texto")  → "texto"}  ou  "texto"} → "texto"}
-                    # Remove qualquer caractere que não seja } após "
-                    fixed = re.sub(r'"\s*\)(\s*[,\]\}])', r'"\1', fixed)  # Remove ) após "
-                    fixed = re.sub(r'"\s*;(\s*[,\]\}])', r'"\1', fixed)   # Remove ; após "
-
-                    if any(pattern in response_text for pattern in ['")' , '";']):
-                        corrections_made.append("caracteres extras após aspas")
-
-                    # 8. CORREÇÃO: Escapar aspas não escapadas dentro de valores JSON
-                    # Problema: "translation": "texto "não escapado" aqui"
-                    # Solução: Processar cada linha procurando por padrão problemático
-                    lines_fixed = []
-                    aspas_corrigidas = False
-                    for line in fixed.split('\n'):
-                        # Procurar linhas com location ou translation
-                        if '"location":' in line or '"translation":' in line:
-                            # Contar aspas na linha (deveria ter 4: "key": "value")
-                            quote_count = line.count('"') - line.count('\\"') * 2
-                            if quote_count > 4:
-                                # Tem aspas extras! Escapar aspas dentro do valor
-                                # Encontrar o valor (depois de : ")
-                                if '": "' in line:
-                                    parts = line.split('": "', 1)
-                                    if len(parts) == 2:
-                                        key_part = parts[0] + '": "'
-                                        value_part = parts[1]
-                                        # Remover aspas de fechamento e vírgula do final
-                                        value_end = '"},' if value_part.endswith('"},') else '"}'
-                                        value_clean = value_part.rstrip('"},')
-                                        # Escapar aspas dentro do valor
-                                        value_escaped = value_clean.replace('"', '\\"')
-                                        line = key_part + value_escaped + value_end
-                                        aspas_corrigidas = True
-                        lines_fixed.append(line)
-
-                    if aspas_corrigidas:
-                        fixed = '\n'.join(lines_fixed)
-                        corrections_made.append("aspas não escapadas dentro de valores")
-
-                    # Tentar parsear após correções
-                    result = json.loads(fixed)
-                    translations = result.get("translations", [])
-
-                    # VALIDAÇÃO: Remover traduções vazias (após auto-correção)
-                    original_count = len(translations)
-                    translations = [t for t in translations if t.get("translation", "").strip()]
-                    removed = original_count - len(translations)
-                    if removed > 0:
-                        print(f"⚠️ {removed} traduções vazias removidas automaticamente")
-
-                    if corrections_made:
-                        print(f" JSON corrigido automaticamente: {', '.join(corrections_made)}")
-
-                except:
-                    # Salvar JSON bruto NO PROJETO para análise
-                    import os
-                    from datetime import datetime
-
-                    # Criar pasta de erros JSON no projeto
-                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    error_dir = os.path.join(project_root, "claude_json_errors")
-                    os.makedirs(error_dir, exist_ok=True)
-
-                    # Nome do arquivo com timestamp
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    error_file = os.path.join(error_dir, f"claude_error_{timestamp}.json")
-
-                    # Salvar JSON bruto
-                    with open(error_file, 'w', encoding='utf-8') as f:
-                        f.write(response_text)
-
-                    print(f"\n{'='*80}")
-                    print(f" ERRO JSON SALVO PARA ANÁLISE:")
-                    print(f"   Arquivo: {error_file}")
-                    print(f"   Tamanho: {len(response_text)} caracteres")
-                    print(f"   Erro: {str(e)}")
-                    print(f"{'='*80}\n")
-
-                    # Se ainda falhar, mostrar erro detalhado
-                    error_msg = f"Erro ao fazer parse da resposta Claude: {str(e)}\n\n"
-                    error_msg += f"Resposta recebida (primeiros 1000 chars):\n{response_text[:1000]}\n\n"
-                    error_msg += f"🗂️ JSON COMPLETO salvo em:\n{error_file}\n\n"
-                    error_msg += "💡 Analise o JSON salvo para criar algoritmo de correção eficaz."
-                    raise Exception(error_msg)
+            # 🛡️ SISTEMA ANTI-FALHA: Parse JSON com múltiplas tentativas
+            translations = self._parse_json_with_retry(
+                response_text=response_text,
+                tokens=tokens,
+                source=source,
+                target=target,
+                dictionary=dictionary,
+                company_name=company_name
+            )
 
             # Calcular estatísticas de uso
             usage = message.usage
@@ -738,6 +602,245 @@ TRANSLATION RULES:
             raise Exception(f"Erro na API Claude: {error_str}")
         except Exception as e:
             raise Exception(f"Erro ao traduzir documento com Claude: {str(e)}")
+
+    def _parse_json_with_retry(
+        self,
+        response_text: str,
+        tokens: List[Dict[str, str]],
+        source: str,
+        target: str,
+        dictionary: Optional[Dict[str, str]],
+        company_name: Optional[str]
+    ) -> List[Dict[str, str]]:
+        """
+        🛡️ SISTEMA ANTI-FALHA COMPLETO
+
+        Parse JSON com múltiplas camadas de proteção:
+        1. Tentativa normal
+        2. Auto-correção de erros comuns
+        3. Re-prompt reformulado (se falhar 2x)
+        4. Divisão do batch (se extrapolou limites)
+        5. Fallback com texto original (NUNCA FALHA)
+
+        Returns:
+            Lista de traduções (SEMPRE retorna algo, nunca falha)
+        """
+        import re
+        from datetime import datetime
+
+        # 🔹 TENTATIVA 1: Parse normal
+        try:
+            # Remover markdown code blocks se existirem
+            cleaned = response_text
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                cleaned = "\n".join(lines[1:-1])
+
+            result = json.loads(cleaned)
+            translations = result.get("translations", [])
+
+            # VALIDAÇÃO: Remover traduções vazias
+            original_count = len(translations)
+            translations = [t for t in translations if t.get("translation", "").strip()]
+            removed = original_count - len(translations)
+            if removed > 0:
+                print(f"⚠️ {removed} traduções vazias removidas automaticamente")
+
+            print(f"   ✅ JSON parseado com sucesso ({len(translations)} traduções)")
+            return translations
+
+        except json.JSONDecodeError as e:
+            print(f"   ⚠️ Erro JSON na tentativa 1: {str(e)[:100]}")
+
+        # 🔹 TENTATIVA 2: Auto-correção de erros comuns
+        try:
+            print(f"   🔧 Tentando auto-correção de JSON...")
+            fixed = response_text
+            corrections_made = []
+
+            # 2. Corrigir aspas duplas escapadas duplicadas
+            if r'\\"' in fixed:
+                fixed = re.sub(r'\\"', r'\"', fixed)
+                corrections_made.append("aspas duplas escapadas")
+
+            # 3. Corrigir aspas simples ao invés de duplas
+            if "'" in fixed and '"' not in fixed:
+                fixed = fixed.replace("'", '"')
+                corrections_made.append("aspas simples → duplas")
+
+            # 4. Corrigir vírgulas faltantes entre objetos JSON
+            virgula_faltante = re.compile(r'\}\s*\n\s*\{')
+            if virgula_faltante.search(fixed):
+                fixed = virgula_faltante.sub(r'},\n    {', fixed)
+                corrections_made.append("vírgulas faltantes")
+
+            # 5. Corrigir ponto e vírgula antes de chave
+            if '";}"' in fixed or "';}" in fixed:
+                fixed = fixed.replace('";}"', '"}').replace("';}'", "}")
+                corrections_made.append("ponto e vírgula")
+
+            # 6. Remover caracteres de controle inválidos
+            fixed = re.sub(r'(?<!\\)\t', ' ', fixed)
+            fixed = re.sub(r'(?<!\\)\r', '', fixed)
+            fixed = re.sub(r':\s*"([^"]*)\n([^"]*)"', r': "\1\\n\2"', fixed)
+
+            # 7. Corrigir caracteres extras após aspas
+            fixed = re.sub(r'"\s*\)(\s*[,\]\}])', r'"\1', fixed)
+            fixed = re.sub(r'"\s*;(\s*[,\]\}])', r'"\1', fixed)
+            if '")' in response_text or '";' in response_text:
+                corrections_made.append("caracteres extras")
+
+            # 8. Escapar aspas não escapadas dentro de valores
+            lines_fixed = []
+            aspas_corrigidas = False
+            for line in fixed.split('\n'):
+                if '"location":' in line or '"translation":' in line:
+                    quote_count = line.count('"') - line.count('\\"') * 2
+                    if quote_count > 4:
+                        if '": "' in line:
+                            parts = line.split('": "', 1)
+                            if len(parts) == 2:
+                                key_part = parts[0] + '": "'
+                                value_part = parts[1]
+                                value_end = '"},' if value_part.endswith('"},') else '"}'
+                                value_clean = value_part.rstrip('"},')
+                                value_escaped = value_clean.replace('"', '\\"')
+                                line = key_part + value_escaped + value_end
+                                aspas_corrigidas = True
+                lines_fixed.append(line)
+
+            if aspas_corrigidas:
+                fixed = '\n'.join(lines_fixed)
+                corrections_made.append("aspas não escapadas")
+
+            # Tentar parsear após correções
+            result = json.loads(fixed)
+            translations = result.get("translations", [])
+
+            # VALIDAÇÃO: Remover traduções vazias
+            original_count = len(translations)
+            translations = [t for t in translations if t.get("translation", "").strip()]
+            removed = original_count - len(translations)
+            if removed > 0:
+                print(f"⚠️ {removed} traduções vazias removidas")
+
+            if corrections_made:
+                print(f"   ✅ JSON corrigido: {', '.join(corrections_made)}")
+
+            return translations
+
+        except Exception as e2:
+            print(f"   ⚠️ Auto-correção falhou: {str(e2)[:100]}")
+
+        # 🔹 TENTATIVA 3: Re-prompt com instruções ULTRA simplificadas
+        print(f"   🔄 Re-prompt com instruções simplificadas (tentativa 3)...")
+        try:
+            # Prompt ultra simplificado focado APENAS em JSON válido
+            simple_system = f"""You are a translator. Translate from {source} to {target}.
+
+CRITICAL: Return ONLY this JSON structure (no other text):
+{{{{
+  "translations": [
+    {{{{"location": "...", "translation": "..."}}}},
+    {{{{"location": "...", "translation": "..."}}}}
+  ]
+}}}}
+
+Rules:
+1. EXACTLY {len(tokens)} translations (one per location)
+2. Use double quotes (not single)
+3. Escape quotes inside text: \\"
+4. Add comma between objects
+5. NO text before or after JSON"""
+
+            tokens_json = json.dumps(tokens, ensure_ascii=False, indent=2)
+
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=0.1,  # Mais determinístico
+                system=[{"type": "text", "text": simple_system}],
+                messages=[{"role": "user", "content": f"Translate:\n{tokens_json}"}]
+            )
+
+            response_text2 = message.content[0].text.strip()
+
+            # Limpar response
+            if response_text2.startswith("```"):
+                lines = response_text2.split("\n")
+                response_text2 = "\n".join(lines[1:-1])
+
+            # Extrair apenas JSON
+            json_match = re.search(r'\{.*\}', response_text2, re.DOTALL)
+            if json_match:
+                response_text2 = json_match.group(0)
+
+            result = json.loads(response_text2)
+            translations = result.get("translations", [])
+            translations = [t for t in translations if t.get("translation", "").strip()]
+
+            print(f"   ✅ Re-prompt funcionou! ({len(translations)} traduções)")
+            return translations
+
+        except Exception as e3:
+            print(f"   ⚠️ Re-prompt falhou: {str(e3)[:100]}")
+
+        # 🔹 TENTATIVA 4: Dividir batch em partes menores
+        if len(tokens) > 10 and response_text:  # Só se tiver response_text (não é recursão)
+            print(f"   ✂️ Dividindo batch em 2 partes e fazendo novas requisições...")
+            try:
+                mid = len(tokens) // 2
+                batch1 = tokens[:mid]
+                batch2 = tokens[mid:]
+
+                # Traduzir primeira metade (faz nova requisição à API)
+                print(f"   📤 Traduzindo parte 1/2 ({len(batch1)} tokens)...")
+                trans1, _ = self._translate_batch(batch1, source, target, dictionary, company_name)
+
+                # Traduzir segunda metade (faz nova requisição à API)
+                print(f"   📤 Traduzindo parte 2/2 ({len(batch2)} tokens)...")
+                trans2, _ = self._translate_batch(batch2, source, target, dictionary, company_name)
+
+                print(f"   ✅ Divisão funcionou! ({len(trans1)+len(trans2)} traduções)")
+                return trans1 + trans2
+
+            except Exception as e4:
+                print(f"   ⚠️ Divisão falhou: {str(e4)[:100]}")
+
+        # 🔹 FALLBACK FINAL: Salvar erro e retornar texto original
+        print(f"   ⛔ TODAS as tentativas falharam!")
+        print(f"   📝 Usando TEXTO ORIGINAL como fallback (tradução continuará)")
+
+        # Salvar JSON bruto para análise
+        try:
+            import os
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            error_dir = os.path.join(project_root, "claude_json_errors")
+            os.makedirs(error_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_file = os.path.join(error_dir, f"claude_error_{timestamp}.json")
+
+            with open(error_file, 'w', encoding='utf-8') as f:
+                f.write(f"=== TOKENS ENVIADOS ===\n")
+                f.write(json.dumps(tokens, ensure_ascii=False, indent=2))
+                f.write(f"\n\n=== RESPOSTA RECEBIDA ===\n")
+                f.write(response_text)
+
+            print(f"   💾 Erro salvo em: {error_file}")
+        except:
+            pass
+
+        # Retornar tokens com texto original (NUNCA FALHA)
+        fallback_translations = [
+            {"location": t["location"], "translation": t["text"]}
+            for t in tokens
+        ]
+
+        print(f"   ⚠️ Retornando {len(fallback_translations)} textos SEM tradução")
+        print(f"   🔄 Tradução continuará com próximo batch...")
+
+        return fallback_translations
 
     def calculate_cost(self, usage: Dict[str, int]) -> float:
         """

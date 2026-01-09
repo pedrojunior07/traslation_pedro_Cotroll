@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Ponto de entrada principal do Tradutor Master.
